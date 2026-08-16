@@ -314,8 +314,17 @@ def main() -> None:
     if not linhas:
         print("[AVISO] nenhuma linha coletada nesta execução.")
         return
+    primeira_coleta = not CSV_PATH.exists()
     gravar(linhas)
     print(f"[OK] {len(linhas)} preços gravados.")
+
+    if primeira_coleta:
+        melhor = min(linhas, key=lambda x: x["preco_total_brl"])
+        enviar_email([
+            "🎉 PRIMEIRA COLETA COM DADOS! O cache da Aviasales começou a ter preços pras suas rotas.",
+            f"Melhor preço visto: {melhor['origem']}→{melhor['destino']} ({melhor['tipo']}) — {brl(melhor['preco_total_brl'])}",
+            "A partir de agora o robô acumula histórico de hora em hora. Bom momento pra ativar o GitHub Pages (dashboard).",
+        ])
 
     msgs = checar_alertas(linhas)
     if msgs:
