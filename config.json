@@ -1,0 +1,43 @@
+{
+  "origens": [
+    "GRU",
+    "VCP"
+  ],
+  "origens_one_way": [
+    "GRU",
+    "VCP",
+    "CGH"
+  ],
+  "destinos": [
+    "MCO",
+    "TPA"
+  ],
+  "datas": [
+    [
+      "2026-09-23",
+      "2026-09-29"
+    ],
+    [
+      "2026-09-24",
+      "2026-09-30"
+    ]
+  ],
+  "adultos": 2,
+  "moeda": "BRL",
+  "max_conexoes": 1,
+  "opcoes_por_consulta": 5,
+  "max_duracao_voo_h": 11,
+  "tampa_custo_extra_brl": 1800,
+  "alerta_queda_pct": 8,
+  "alerta_limite_brl": {
+    "MCO": 0,
+    "TPA": 0
+  },
+  "favoritos": [
+    {
+      "nome": "AA noturno via MIA (chega 8h)",
+      "voos": "AA930",
+      "limite_brl": 0
+    }
+  ]
+}
