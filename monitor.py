@@ -1,24 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-Monitor de passagens aéreas SP -> Orlando/Tampa (Travelpayouts / Aviasales Data API).
+Monitor de passagens aéreas SP -> Orlando/Tampa (SerpApi / Google Flights).
 
-Toda hora roda a grade completa: origens x destinos x datas, em ida-e-volta,
-só ida e só volta (com CGH nos trechos avulsos). Grava em data/precos.csv,
-dispara alerta por e-mail em queda relevante e regenera docs/index.html.
+Roda 1x por dia, consulta as rotas configuradas em ida-e-volta fechado nas datas
+fixas, grava histórico em data/precos.csv, dispara alerta por e-mail em queda
+relevante e regenera docs/index.html.
 
-Observações do motor Travelpayouts:
-- Preço vem do cache real de buscas da Aviasales (tarifa base, por 1 adulto).
-  O robô multiplica por 2 (casal). Bagagem despachada NÃO é garantida — conferir no link.
-- A API informa companhia + número do 1º voo (ex.: AA930), nº de conexões e duração,
-  mas não o aeroporto de conexão.
+Motor SerpApi (engine=google_flights):
+- Ida e volta exige DUAS chamadas: a 1ª devolve as opções de ida com um
+  departure_token; a 2ª (com esse token) devolve a volta já com o preço do
+  pacote fechado. Custo: 2 buscas por rota.
+- O custo de bagagem despachada só existe na resposta de booking options
+  (3ª chamada, via booking_token). Como taxa de bagagem não muda de hora em
+  hora, o valor é cacheado por (cia, rota) em data/bagagem_cache.json.
 
 Variáveis de ambiente (GitHub Secrets):
-  TP_TOKEN, MAIL_USER, MAIL_PASS, MAIL_TO
+  SERP_KEY, MAIL_USER, MAIL_PASS, MAIL_TO
 """
 
 import csv
 import json
 import os
+import re
 import smtplib
 import sys
 import time
@@ -29,170 +32,342 @@ from pathlib import Path
 import requests
 
 BASE_DIR = Path(__file__).resolve().parent
-CSV_PATH = BASE_DIR / "data" / "precos.csv"
+DATA_DIR = BASE_DIR / "data"
+CSV_PATH = DATA_DIR / "precos.csv"
+CACHE_BAGAGEM = DATA_DIR / "bagagem_cache.json"
+USO_PATH = DATA_DIR / "uso_serpapi.json"
 CFG = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
 
 BRT = timezone(timedelta(hours=-3))
-TP_URL = "https://api.travelpayouts.com/aviasales/v3/prices_for_dates"
-
-# fuso local (horas) por aeroporto — Flórida em setembro = EDT (-4)
-TZ_AEROPORTO = {"GRU": -3, "VCP": -3, "CGH": -3, "MCO": -4, "TPA": -4}
+SERP_URL = "https://serpapi.com/search.json"
 
 CSV_COLS = [
     "ts_utc", "ts_brt", "hora_brt", "dia_semana_brt",
     "origem", "destino", "data_ida", "data_volta", "tipo", "rank",
-    "preco_total_brl", "cia", "voos_ida", "voos_volta", "via_ida", "via_volta",
+    "preco_total_brl", "bagagem_brl", "bagagem_fonte", "custo_total_brl",
+    "cia", "voos_ida", "voos_volta", "via_ida", "via_volta",
     "partida_ida", "chegada_ida", "partida_volta", "chegada_volta",
     "conexoes_ida", "conexoes_volta", "duracao_ida", "duracao_volta",
 ]
+
+_creditos = 0
+
+# Teto de consultas novas de bagagem por execução: no 1º dia o cache está vazio e
+# cada combinação (cia, rota) gastaria 1 busca. O que não couber usa a estimativa
+# e é consultado nas próximas rodadas, conforme o cache se preenche.
+MAX_BAGAGEM_NOVAS = 6
+_bagagem_novas = 0
 
 
 def brl(v) -> str:
     return "R$ " + f"{v:,.0f}".replace(",", ".")
 
 
-# ------------------------------------------------------------- travelpayouts ---
-def _hora(iso: str) -> str:
-    """'2026-09-23T21:25:00-03:00' -> '21:25'."""
-    return iso[11:16] if iso and len(iso) >= 16 else ""
-
-
-def _chegada(iso_partida: str, duracao_min, origem: str, destino: str) -> str:
-    """Chegada no horário local do destino, estimada por partida + duração + fuso."""
-    if not iso_partida or not duracao_min:
-        return ""
-    try:
-        dep = datetime.fromisoformat(iso_partida)
-        delta_fuso = TZ_AEROPORTO.get(destino, -3) - TZ_AEROPORTO.get(origem, -3)
-        arr = dep + timedelta(minutes=int(duracao_min) + delta_fuso * 60)
-        mais1 = "+1" if arr.date() > dep.date() else ""
-        return arr.strftime("%H:%M") + mais1
-    except (ValueError, TypeError):
-        return ""
-
-
-def buscar(origem: str, destino: str, ida: str, volta: str | None) -> list[dict]:
-    """Top N ofertas do cache da Aviasales que respeitam o limite de conexões."""
-    params = {
-        "origin": origem,
-        "destination": destino,
-        "departure_at": ida,
-        "one_way": "false" if volta else "true",
-        "direct": "false",
-        "unique": "false",
-        "sorting": "price",
-        "currency": CFG["moeda"].lower(),
-        "market": "br",
-        "limit": 30,
-        "token": os.environ["TP_TOKEN"],
-    }
-    if volta:
-        params["return_at"] = volta
-
-    r = requests.get(TP_URL, params=params, timeout=60)
+# -------------------------------------------------------------- serpapi io ---
+def _serp(params: dict) -> dict:
+    """Uma chamada à SerpApi. Cada chamada consome 1 busca da cota mensal."""
+    global _creditos
+    p = dict(params, engine="google_flights", api_key=os.environ["SERP_KEY"])
+    r = requests.get(SERP_URL, params=p, timeout=90)
     if r.status_code == 429:
-        time.sleep(3)
-        r = requests.get(TP_URL, params=params, timeout=60)
+        time.sleep(5)
+        r = requests.get(SERP_URL, params=p, timeout=90)
+    _creditos += 1
     r.raise_for_status()
+    j = r.json()
+    if j.get("error"):
+        raise RuntimeError(f"SerpApi: {j['error']}")
+    return j
 
-    brutos = r.json().get("data", [])
-    print(f"[API] {origem}->{destino} {ida} volta={volta}: {len(brutos)} ofertas brutas")
+
+def _params_base(origem: str, destino: str) -> dict:
+    return {
+        "departure_id": origem,
+        "arrival_id": destino,
+        "outbound_date": CFG["data_ida"],
+        "return_date": CFG["data_volta"],
+        "type": 1,                       # 1 = ida e volta
+        "travel_class": 1,               # econômica
+        "adults": CFG["adultos"],
+        "currency": CFG["moeda"],
+        "stops": 2 if CFG["max_conexoes"] == 1 else 0,   # 2 = até 1 conexão
+        "gl": "br",
+        "hl": "en",   # textos em inglês: o parser de bagagem casa "checked bag"
+        "deep_search": "true",
+    }
+
+
+# ------------------------------------------------------------- parsing ---
+def _hhmm(ts: str) -> str:
+    """'2026-09-23 21:25' -> '21:25'."""
+    return ts[11:16] if ts and len(ts) >= 16 else ""
+
+
+def _dia(ts: str) -> str:
+    return ts[:10] if ts and len(ts) >= 10 else ""
+
+
+def _cod_voo(seg: dict) -> str:
+    """'AA 930' -> 'AA930'."""
+    return str(seg.get("flight_number", "")).replace(" ", "")
+
+
+def regex_favorito(alvo: str) -> str:
+    """Casa o alvo no início de um número de voo, não no meio (AD87 ≠ AD8700)."""
+    return rf"(?:^|,){re.escape(alvo)}(?:,|$)"
+
+
+def casa_favorito(voos, alvo: str) -> bool:
+    return any(v == alvo for v in str(voos or "").split(","))
+
+
+def _separar_legs(segs: list[dict], origem: str, destino: str) -> tuple[list, list]:
+    """
+    Divide os segmentos em ida e volta.
+
+    A 2ª chamada pode devolver só os segmentos da volta ou o itinerário inteiro,
+    dependendo da rota; separar pelo ponto em que o voo parte do destino cobre
+    os dois casos sem depender do formato.
+    """
+    corte = None
+    for i, s in enumerate(segs):
+        if s.get("departure_airport", {}).get("id") == destino:
+            corte = i
+            break
+    if corte is None:
+        return segs, []
+    if corte == 0 and segs and segs[0].get("arrival_airport", {}).get("id") != origem:
+        # começa no destino mas não é o itinerário todo: são só os segmentos da volta
+        return [], segs
+    return segs[:corte], segs[corte:]
+
+
+def _resumo_leg(segs: list[dict]) -> dict:
+    if not segs:
+        return {"voos": "", "via": "", "conexoes": "", "partida": "", "chegada": "",
+                "duracao": "", "cias": []}
+    partida = segs[0].get("departure_airport", {}).get("time", "")
+    chegada_ts = segs[-1].get("arrival_airport", {}).get("time", "")
+    chegada = _hhmm(chegada_ts)
+    if _dia(chegada_ts) > _dia(partida):
+        chegada += "+1"
+    vias = [s.get("arrival_airport", {}).get("id", "") for s in segs[:-1]]
+    duracao = sum(int(s.get("duration") or 0) for s in segs)
+    return {
+        "voos": ",".join(_cod_voo(s) for s in segs),
+        "via": ",".join(v for v in vias if v),
+        "conexoes": len(segs) - 1,
+        "partida": _hhmm(partida),
+        "chegada": chegada,
+        "duracao": duracao,
+        "cias": [_cod_voo(s)[:2] for s in segs],
+    }
+
+
+# ------------------------------------------------------------- bagagem ---
+def _cache_bagagem() -> dict:
+    if CACHE_BAGAGEM.exists():
+        return json.loads(CACHE_BAGAGEM.read_text(encoding="utf-8"))
+    return {}
+
+
+def _grava_cache_bagagem(cache: dict) -> None:
+    DATA_DIR.mkdir(exist_ok=True)
+    CACHE_BAGAGEM.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _valores(txt: str) -> list[float]:
+    """Extrai valores monetários de 'R$ 1,234' / '99-187' / 'R$ 250,00'."""
+    out = []
+    for bruto in re.findall(r"\d[\d.,]*", txt):
+        n = bruto.rstrip(".,")
+        if "," in n and "." in n:
+            n = n.replace(".", "").replace(",", ".") if n.rfind(",") > n.rfind(".") \
+                else n.replace(",", "")
+        elif "," in n:
+            # vírgula com 2 casas = decimal; com 3 = milhar
+            n = n.replace(",", ".") if len(n.split(",")[-1]) == 2 else n.replace(",", "")
+        elif "." in n:
+            n = n if len(n.split(".")[-1]) == 2 else n.replace(".", "")
+        try:
+            out.append(float(n))
+        except ValueError:
+            continue
+    return out
+
+
+def _preco_mala(linhas) -> float | None:
+    """Custo da 1ª mala despachada, por trecho e por pessoa. Faixa -> pior caso."""
+    if isinstance(linhas, dict):
+        linhas = [t for v in linhas.values() for t in (v if isinstance(v, list) else [v])]
+    for linha in linhas or []:
+        txt = str(linha)
+        if not re.search(r"checked bag|bagagem despachada", txt, re.I):
+            continue
+        # "1st checked bag" e "2 free checked bags" trazem dígitos que não são preço
+        limpo = re.sub(r"\b\d+\s*(st|nd|rd|th|ª|a)\b", " ", txt, flags=re.I)
+        limpo = re.sub(r"\b\d+\s+(free|gr[áa]tis)\b", " free ", limpo, flags=re.I)
+        vals = _valores(limpo)
+        if vals:
+            return max(vals)
+        if re.search(r"free|gr[áa]tis|inclu", limpo, re.I):
+            return 0.0
+    return None
+
+
+def custo_bagagem(booking_token: str, cias: list[str], origem: str, destino: str,
+                  params_busca: dict) -> tuple[float, str]:
+    """
+    Custo de bagagem despachada da viagem inteira (2 malas x 2 trechos x 2 adultos
+    conforme config), em R$. Devolve (valor, fonte).
+
+    Cias isentas (Azul/Safira) saem zeradas sem gastar chamada. Nas demais,
+    consulta booking options 1x por (cia, rota) e cacheia por 'cache_dias'.
+    """
+    bag = CFG.get("bagagem") or {}
+    isentas = set(bag.get("cias_isentas", []))
+    cias_set = {c for c in cias if c}
+    if cias_set and cias_set.issubset(isentas):
+        return 0.0, "isenta"
+
+    malas = bag.get("malas_total", 0)
+    fallback = malas * bag.get("custo_por_mala_trecho_brl", 0) * 2
+
+    chave = f"{'-'.join(sorted(cias_set))}|{origem}-{destino}"
+    cache = _cache_bagagem()
+    reg = cache.get(chave)
+    if reg and (datetime.now(timezone.utc) - datetime.fromisoformat(reg["ts"])).days < bag.get("cache_dias", 14):
+        if reg["mala"] is None:
+            return fallback, "estimativa"
+        return reg["mala"] * malas * 2, "api-cache"
+
+    global _bagagem_novas
+    if _bagagem_novas >= MAX_BAGAGEM_NOVAS:
+        print(f"[BAG] teto de {MAX_BAGAGEM_NOVAS} consultas novas atingido; {chave} fica na estimativa")
+        return fallback, "estimativa"
+
+    if not booking_token:
+        return fallback, "estimativa"
+
+    try:
+        _bagagem_novas += 1
+        j = _serp(dict(params_busca, booking_token=booking_token))
+        precos = j.get("baggage_prices")
+        if precos is None:
+            for o in j.get("booking_options") or []:
+                alvo = o.get("together") or o.get("departing") or o
+                if isinstance(alvo, dict) and alvo.get("baggage_prices"):
+                    precos = alvo["baggage_prices"]
+                    break
+        mala = _preco_mala(precos)
+    except Exception as e:  # noqa: BLE001 — bagagem não pode derrubar a coleta
+        # falha transitória não vai pro cache: tenta de novo na próxima rodada
+        print(f"[BAG] falha em {chave}: {e}", file=sys.stderr)
+        return fallback, "estimativa"
+
+    cache[chave] = {"ts": datetime.now(timezone.utc).isoformat(), "mala": mala}
+    _grava_cache_bagagem(cache)
+
+    if mala is None:
+        return fallback, "estimativa"
+    return mala * malas * 2, "api"
+
+
+# -------------------------------------------------------------- busca ---
+def buscar(origem: str, destino: str) -> list[dict]:
+    """Melhores pacotes ida-e-volta da rota. Consome 2 buscas + bagagem não cacheada."""
+    base = _params_base(origem, destino)
+    ida_j = _serp(base)
+    idas = (ida_j.get("best_flights") or []) + (ida_j.get("other_flights") or [])
+    print(f"[API] {origem}->{destino}: {len(idas)} opções de ida")
+    if not idas:
+        return []
+
+    # a ida mais barata define o token; a 2ª chamada traz as voltas com preço fechado
+    idas.sort(key=lambda o: float(o.get("price") or 10**9))
+    token = idas[0].get("departure_token")
+    if not token:
+        print(f"[AVISO] {origem}->{destino}: sem departure_token", file=sys.stderr)
+        return []
+
+    volta_j = _serp(dict(base, departure_token=token))
+    pacotes = (volta_j.get("best_flights") or []) + (volta_j.get("other_flights") or [])
+    print(f"[API] {origem}->{destino}: {len(pacotes)} pacotes fechados")
 
     max_con = CFG["max_conexoes"]
-    validas = []
-    for of in brutos:
-        if (of.get("transfers") or 0) > max_con:
+    validos = []
+    for p in pacotes:
+        segs = p.get("flights") or []
+        ida_segs, volta_segs = _separar_legs(segs, origem, destino)
+        if not ida_segs:
+            ida_segs = idas[0].get("flights") or []
+        if len(ida_segs) - 1 > max_con or len(volta_segs) - 1 > max_con:
             continue
-        if volta and (of.get("return_transfers") or 0) > max_con:
-            continue
-        validas.append(of)
+        validos.append((p, ida_segs, volta_segs))
 
-    if not brutos and len(ida) == 10:
-        # cache por data exata vazio -> consulta o mês inteiro e filtra
-        params_mes = dict(params, departure_at=ida[:7])
-        if volta:
-            params_mes["return_at"] = volta[:7]
-        r2 = requests.get(TP_URL, params=params_mes, timeout=60)
-        if r2.ok:
-            todos = r2.json().get("data", [])
-            brutos = [o for o in todos
-                      if str(o.get("departure_at", ""))[:10] == ida
-                      and (not volta or str(o.get("return_at", ""))[:10] == volta)]
-            print(f"[API-mes] {origem}->{destino}: {len(todos)} no mês, {len(brutos)} nas datas exatas")
-            for of in brutos:
-                if (of.get("transfers") or 0) > max_con:
-                    continue
-                if volta and (of.get("return_transfers") or 0) > max_con:
-                    continue
-                validas.append(of)
-
-    validas.sort(key=lambda o: float(o["price"]))
+    validos.sort(key=lambda t: float(t[0].get("price") or 10**9))
     opcoes = []
-    for rank, of in enumerate(validas[: CFG.get("opcoes_por_consulta", 5)], start=1):
-        dur_ida = of.get("duration_to") or of.get("duration") or ""
-        dur_volta = of.get("duration_back") or "" if volta else ""
-        partida_ida = _hora(of.get("departure_at", ""))
-        partida_volta = _hora(of.get("return_at", "")) if volta else ""
-        voo = f'{of.get("airline", "")}{of.get("flight_number", "")}'
+    for rank, (p, ida_segs, volta_segs) in enumerate(validos[: CFG.get("opcoes_por_consulta", 5)], start=1):
+        ri, rv = _resumo_leg(ida_segs), _resumo_leg(volta_segs)
+        cias = sorted(set(ri["cias"] + rv["cias"]))
+        # SerpApi devolve o preço já totalizado para os `adults` da busca.
+        preco = float(p.get("price") or 0)
+        bagagem, fonte = custo_bagagem(p.get("booking_token", ""), cias, origem, destino, base)
         opcoes.append({
             "rank": rank,
-            # preço do cache é por 1 adulto -> x2 (casal)
-            "preco": round(float(of["price"]) * CFG["adultos"], 2),
-            "cia": of.get("airline", ""),
-            "voos_ida": voo,
-            "voos_volta": "",
-            "via_ida": "",
-            "via_volta": "",
-            "partida_ida": partida_ida,
-            "chegada_ida": _chegada(of.get("departure_at", ""), dur_ida, origem, destino),
-            "partida_volta": partida_volta,
-            "chegada_volta": _chegada(of.get("return_at", ""), dur_volta, destino, origem) if volta else "",
-            "conexoes_ida": of.get("transfers", 0),
-            "conexoes_volta": of.get("return_transfers", 0) if volta else "",
-            "duracao_ida": dur_ida,
-            "duracao_volta": dur_volta,
+            "preco": round(preco, 2),
+            "bagagem": round(bagagem, 2),
+            "bagagem_fonte": fonte,
+            "custo_total": round(preco + bagagem, 2),
+            "cia": ",".join(cias),
+            "voos_ida": ri["voos"], "voos_volta": rv["voos"],
+            "via_ida": ri["via"], "via_volta": rv["via"],
+            "partida_ida": ri["partida"], "chegada_ida": ri["chegada"],
+            "partida_volta": rv["partida"], "chegada_volta": rv["chegada"],
+            "conexoes_ida": ri["conexoes"], "conexoes_volta": rv["conexoes"],
+            "duracao_ida": ri["duracao"], "duracao_volta": rv["duracao"],
         })
     return opcoes
 
 
 # ------------------------------------------------------------------ coleta ---
-def montar_consultas(agora_brt: datetime) -> list[dict]:
-    """Grade completa em toda execução (a API da Travelpayouts é gratuita)."""
-    consultas = []
-
-    def add(origem, destino, ida, volta, tipo):
-        consultas.append(dict(origem=origem, destino=destino, ida=ida, volta=volta, tipo=tipo))
-
-    for d in CFG["destinos"]:
-        for ida, volta in CFG["datas"]:
-            for o in CFG["origens"]:
-                add(o, d, ida, volta, "RT")
-            for o in CFG.get("origens_one_way", CFG["origens"]):
-                add(o, d, ida, None, "IDA")
-                add(d, o, volta, None, "VOLTA")
-
-    vistos, unicas = set(), []
-    for c in consultas:
-        k = (c["origem"], c["destino"], c["ida"], c["volta"], c["tipo"])
-        if k not in vistos:
-            vistos.add(k)
-            unicas.append(c)
-    return unicas
+def rotas_do_dia(agora_brt: datetime) -> list[dict]:
+    """Rotas marcadas para hoje. 'dias' aceita 'todos' ou lista de weekday() (0=seg)."""
+    hoje = agora_brt.weekday()
+    ativas = []
+    for r in CFG["rotas"]:
+        dias = r.get("dias", "todos")
+        if dias == "todos" or hoje in dias:
+            ativas.append(r)
+    return ativas
 
 
-def coletar() -> list[dict]:
+def _uso_mes(mes: str) -> int:
+    if not USO_PATH.exists():
+        return 0
+    reg = json.loads(USO_PATH.read_text(encoding="utf-8"))
+    return reg.get("buscas", 0) if reg.get("mes") == mes else 0
+
+
+def _grava_uso(mes: str, buscas: int) -> None:
+    DATA_DIR.mkdir(exist_ok=True)
+    USO_PATH.write_text(json.dumps({"mes": mes, "buscas": buscas}, indent=2), encoding="utf-8")
+
+
+def coletar(rotas: list[dict]) -> list[dict]:
     agora_utc = datetime.now(timezone.utc)
     agora_brt = agora_utc.astimezone(BRT)
     linhas = []
 
-    for c in montar_consultas(agora_brt):
+    for r in rotas:
+        origem, destino = r["origem"], r["destino"]
         try:
-            opcoes = buscar(c["origem"], c["destino"], c["ida"], c["volta"])
-        except Exception as e:  # noqa: BLE001 — coleta não pode parar por 1 falha
-            print(f"[ERRO] {c}: {e}", file=sys.stderr)
+            opcoes = buscar(origem, destino)
+        except Exception as e:  # noqa: BLE001 — uma rota quebrada não para as outras
+            print(f"[ERRO] {origem}->{destino}: {e}", file=sys.stderr)
             continue
         if not opcoes:
-            print(f"[VAZIO] {c}")
+            print(f"[VAZIO] {origem}->{destino}")
             continue
         for res in opcoes:
             linhas.append({
@@ -200,24 +375,27 @@ def coletar() -> list[dict]:
                 "ts_brt": agora_brt.strftime("%Y-%m-%d %H:%M"),
                 "hora_brt": agora_brt.hour,
                 "dia_semana_brt": agora_brt.strftime("%a"),
-                "origem": c["origem"],
-                "destino": c["destino"],
-                "data_ida": c["ida"] if c["tipo"] != "VOLTA" else "",
-                "data_volta": c["volta"] or (c["ida"] if c["tipo"] == "VOLTA" else ""),
-                "tipo": c["tipo"],
+                "origem": origem,
+                "destino": destino,
+                "data_ida": CFG["data_ida"],
+                "data_volta": CFG["data_volta"],
+                "tipo": "RT",
+                "preco_total_brl": res["preco"],
+                "bagagem_brl": res["bagagem"],
+                "bagagem_fonte": res["bagagem_fonte"],
+                "custo_total_brl": res["custo_total"],
                 **{k: res[k] for k in (
                     "rank", "cia", "voos_ida", "voos_volta", "via_ida", "via_volta",
                     "partida_ida", "chegada_ida", "partida_volta", "chegada_volta",
                     "conexoes_ida", "conexoes_volta", "duracao_ida", "duracao_volta",
                 )},
-                "preco_total_brl": res["preco"],
             })
-        time.sleep(0.4)  # gentileza com a API
+        time.sleep(1)
     return linhas
 
 
 def gravar(linhas: list[dict]) -> None:
-    CSV_PATH.parent.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(exist_ok=True)
     novo = not CSV_PATH.exists()
     with CSV_PATH.open("a", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=CSV_COLS)
@@ -233,22 +411,19 @@ def checar_alertas(linhas: list[dict]) -> list[str]:
 
     if not CSV_PATH.exists():
         return []
-    df = pd.read_csv(CSV_PATH)
-    df = df[(df["tipo"] == "RT") & (df["rank"] == 1)]
+    df_all = pd.read_csv(CSV_PATH)
+    df = df_all[(df_all["tipo"] == "RT") & (df_all["rank"] == 1)]
     msgs = []
     for ln in linhas:
-        if ln["tipo"] != "RT" or ln["rank"] != 1:
+        if ln["rank"] != 1:
             continue
-        chave = (
-            (df["origem"] == ln["origem"]) & (df["destino"] == ln["destino"])
-            & (df["data_ida"] == ln["data_ida"])
-        )
-        hist = df[chave]["preco_total_brl"]
+        chave = (df["origem"] == ln["origem"]) & (df["destino"] == ln["destino"])
+        hist = df[chave]["custo_total_brl"]
         if len(hist) < 2:
             continue
         anterior = hist.iloc[-2]
         minimo = hist.iloc[:-1].min()
-        preco = ln["preco_total_brl"]
+        preco = ln["custo_total_brl"]
         rota = f"{ln['origem']}→{ln['destino']} {ln['data_ida']} a {ln['data_volta']}"
 
         queda = (anterior - preco) / anterior * 100 if anterior else 0
@@ -261,26 +436,28 @@ def checar_alertas(linhas: list[dict]) -> list[str]:
         elif limite and preco <= limite:
             msgs.append(f"🎯 Abaixo do limite: {rota} — {brl(preco)} (limite {brl(limite)})")
 
-    # --- favoritos: vigia itinerários pelo número do 1º voo (ex.: AA930) ---
-    # Comparação sempre dentro do mesmo trecho: tipo + rota + datas.
-    df_all = pd.read_csv(CSV_PATH)
-    chaves = ["tipo", "origem", "destino", "data_ida", "data_volta"]
+    # --- favoritos: vigia itinerários pelo número do voo (ex.: AA930) ---
+    chaves = ["origem", "destino", "data_ida", "data_volta"]
     for fav in CFG.get("favoritos", []):
         alvo = fav["voos"]
         nome = fav.get("nome", alvo)
         limite = fav.get("limite_brl", 0)
-        atuais = [l for l in linhas if str(l.get("voos_ida", "")).startswith(alvo)]
+        atuais = [l for l in linhas
+                  if casa_favorito(l.get("voos_ida"), alvo)
+                  or casa_favorito(l.get("voos_volta"), alvo)]
         grupos = {}
         for l in atuais:
             grupos.setdefault(tuple(str(l.get(k, "")) for k in chaves), []).append(l)
         for chave, grupo in grupos.items():
-            ln = min(grupo, key=lambda x: x["preco_total_brl"])
-            preco = ln["preco_total_brl"]
-            m = df_all["voos_ida"].astype(str).str.startswith(alvo)
+            ln = min(grupo, key=lambda x: x["custo_total_brl"])
+            preco = ln["custo_total_brl"]
+            padrao = regex_favorito(alvo)
+            m = (df_all["voos_ida"].astype(str).str.contains(padrao, regex=True)
+                 | df_all["voos_volta"].astype(str).str.contains(padrao, regex=True))
             for k, v in zip(chaves, chave):
                 m &= df_all[k].astype(str).fillna("").eq(v)
-            hist = df_all[m & (df_all["ts_utc"] < ln["ts_utc"])]["preco_total_brl"]
-            desc = f"{nome} ({alvo}, {ln['tipo']} {ln['origem']}→{ln['destino']})"
+            hist = df_all[m & (df_all["ts_utc"] < ln["ts_utc"])]["custo_total_brl"]
+            desc = f"{nome} ({alvo}, {ln['origem']}→{ln['destino']})"
             if len(hist):
                 minimo, anterior = hist.min(), hist.iloc[-1]
                 queda = (anterior - preco) / anterior * 100 if anterior else 0
@@ -310,20 +487,41 @@ def enviar_email(msgs: list[str]) -> None:
 
 # -------------------------------------------------------------------- main ---
 def main() -> None:
-    linhas = coletar()
+    agora_brt = datetime.now(timezone.utc).astimezone(BRT)
+    mes = agora_brt.strftime("%Y-%m")
+    usado = _uso_mes(mes)
+    orcamento = CFG.get("orcamento_buscas_mes", 250)
+
+    rotas = rotas_do_dia(agora_brt)
+    estimativa = len(rotas) * 2
+    if usado + estimativa > orcamento:
+        aviso = (f"⚠️ Coleta pulada: cota SerpApi de {orcamento} buscas/mês quase no fim "
+                 f"({usado} usadas, mais {estimativa} nesta rodada). Volta no dia 1º.")
+        print(aviso, file=sys.stderr)
+        enviar_email([aviso])
+        return
+
+    print(f"[COTA] {usado}/{orcamento} buscas usadas em {mes}; {len(rotas)} rotas hoje.")
+    linhas = coletar(rotas)
+    _grava_uso(mes, usado + _creditos)
+    print(f"[COTA] +{_creditos} buscas nesta execução.")
+
     if not linhas:
         print("[AVISO] nenhuma linha coletada nesta execução.")
         return
+
     primeira_coleta = not CSV_PATH.exists()
     gravar(linhas)
     print(f"[OK] {len(linhas)} preços gravados.")
 
     if primeira_coleta:
-        melhor = min(linhas, key=lambda x: x["preco_total_brl"])
+        melhor = min(linhas, key=lambda x: x["custo_total_brl"])
         enviar_email([
-            "🎉 PRIMEIRA COLETA COM DADOS! O cache da Aviasales começou a ter preços pras suas rotas.",
-            f"Melhor preço visto: {melhor['origem']}→{melhor['destino']} ({melhor['tipo']}) — {brl(melhor['preco_total_brl'])}",
-            "A partir de agora o robô acumula histórico de hora em hora. Bom momento pra ativar o GitHub Pages (dashboard).",
+            "🎉 PRIMEIRA COLETA COM DADOS! O monitor agora roda na SerpApi (Google Flights).",
+            f"Melhor custo total visto: {melhor['origem']}→{melhor['destino']} — "
+            f"{brl(melhor['custo_total_brl'])} (tarifa {brl(melhor['preco_total_brl'])} "
+            f"+ bagagem {brl(melhor['bagagem_brl'])})",
+            "A partir de agora o robô acumula histórico 1x por dia.",
         ])
 
     msgs = checar_alertas(linhas)
