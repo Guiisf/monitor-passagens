@@ -54,6 +54,16 @@ def _con_txt(via, conexoes) -> str:
     return "direto" if n == 0 else (f"{n} conexão" if n == 1 else f"{n} conexões")
 
 
+def fonte_bagagem(fonte) -> str:
+    """Rótulo honesto da origem do custo de bagagem mostrado na linha."""
+    f = str(fonte)
+    if "faixa" in f:
+        return "piso da faixa"
+    if f.startswith("api"):
+        return "real"
+    return "estimada"
+
+
 def _hora(txt) -> int | None:
     try:
         return int(str(txt)[:2])
@@ -174,8 +184,7 @@ def _tabela_opcoes(df: pd.DataFrame, cfg: dict) -> str:
         if r.bagagem_brl == 0:
             bag_html = '<div class="sub bag-free">bagagem inclusa ✓</div>'
         else:
-            fonte = "estimada" if r.bagagem_fonte == "estimativa" else "real"
-            bag_html = f'<div class="sub">+ {brl(r.bagagem_brl)} bagagem ({fonte})</div>'
+            bag_html = f'<div class="sub">+ {brl(r.bagagem_brl)} bagagem ({fonte_bagagem(r.bagagem_fonte)})</div>'
 
         extra, total = r._solo, r._total
         extra_html = f'<div class="sub">+ {brl(extra)} solo</div>' if extra else ""
