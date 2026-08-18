@@ -1,55 +1,91 @@
 # ✈ Monitor de passagens — SP → Orlando / Tampa
 
-Robô que roda sozinho no **GitHub Actions**, consulta a **Data API da Travelpayouts (Aviasales)** de hora em hora, grava histórico em `data/precos.csv`, manda **alerta por e-mail** quando o preço cai e publica um **dashboard** via GitHub Pages.
+Robô que roda sozinho no **GitHub Actions**, consulta o **Google Flights via SerpApi** uma vez por dia, grava histórico em `data/precos.csv`, manda **alerta por e-mail** quando o preço cai e publica um **dashboard** via GitHub Pages.
 
-## O que ele monitora (toda hora, 24x/dia)
+## O que ele monitora
 
 | Item | Valor |
 |---|---|
-| Origens | GRU e VCP (ida e volta); GRU, VCP e **CGH** nos trechos avulsos |
-| Destinos | MCO (Orlando) e TPA (Tampa) |
-| Datas | 23→29/09 e 24→30/09/2026 |
-| Formatos | ida e volta fechado **e** só ida + só volta |
+| Datas | ida **23/09/2026**, volta **29/09/2026** (fixas) |
+| Passageiros | 2 adultos, econômica |
+| Formato | ida e volta fechado |
 | Conexões | até 1 |
-| Opções | top 5 de cada consulta, com companhia, 1º voo (ex.: AA930), horários e duração |
-| Favoritos | itinerários vigiados de perto (ex.: AA930), com alerta próprio |
+| Rotas | GRU→MCO, GRU→TPA, VCP→MCO (diárias) · VCP→TPA (seg e qui) |
+| Opções | top 5 de cada rota, com companhia, voos, aeroporto de conexão, horários e duração |
+| Favoritos | AA930 e AD87, com alerta próprio |
 
-**Importante entender o dado:** o preço vem do cache real de buscas da Aviasales — tarifa base, por 1 adulto (o robô multiplica por 2). **Bagagem despachada não é garantida** nessa tarifa: o robô é o radar de tendência e oportunidade; a conferência final com mala você faz no link do Google Flights de cada linha do dashboard. A API é gratuita e sem cota apertada, por isso a grade completa (32 consultas) roda de hora em hora.
+### Prioridades embutidas no dashboard
 
-## Passo a passo (uma vez só, ~15 min)
+- **MCO saindo de GRU é o alvo.** VCP e TPA aparecem como comparativos, mas nunca lado a lado "crus": o painel soma os custos de solo antes de comparar.
+- **VCP** carrega R$ 200 de Uber (+1h30 de deslocamento) — `vcp_custo_extra_brl`.
+- **TPA** carrega R$ 1.800 de carro/estrada — `tampa_custo_extra_brl` — **e só é marcado como viável** se o voo chegar de manhã (5h–12h) e partir à tarde (12h–19h), por causa da 1h de estrada até Orlando de cada lado (`tampa_janela`). Fora dessa janela a opção aparece com o selo vermelho *horário ruim p/ estrada*.
+- A coluna **"custo total na porta"** (tarifa + bagagem + solo) é a que ordena tudo. É nela que se vê se a economia do VCP realmente compensa.
 
-### 1. Token da Travelpayouts ✅ (você já tem)
-Painel → Profile → **API token** → Copy.
+## Bagagem: custo real, não estimativa
+
+Você é **Safira na Azul**, então voos Azul saem com **bagagem inclusa** (`cias_isentas: ["AD"]`) e custo zero no painel.
+
+Nas demais companhias o robô lê o campo `baggage_prices` da SerpApi e calcula `2 malas × valor real × 2 trechos`. Como esse campo só existe na resposta de *booking options* (uma chamada a mais por itinerário), o valor é **cacheado por companhia + rota** em `data/bagagem_cache.json` e revalidado a cada 14 dias — taxa de bagagem não muda de hora em hora. Quando a API não informa, cai no fallback de `custo_por_mala_trecho_brl` (R$ 380) e a linha aparece marcada como *estimada* em vez de *real*.
+
+## Cota da SerpApi
+
+O free tier dá **250 buscas/mês** e cada rota ida-e-volta consome **2 buscas** (o Google Flights exige uma 2ª chamada, com `departure_token`, para fechar a volta com o preço do pacote).
+
+| Dia | Rotas | Buscas |
+|---|---|---|
+| seg e qui | 4 | 8 |
+| demais dias | 3 | 6 |
+
+≈ **198 buscas/mês** em coleta, mais alguns créditos esporádicos de bagagem quando o cache expira — sobra folga para testes manuais.
+
+O consumo é contado em `data/uso_serpapi.json`. Se a rodada do dia fosse estourar `orcamento_buscas_mes`, o robô **pula a coleta e te avisa por e-mail** em vez de falhar silenciosamente.
+
+## Passo a passo
+
+### 1. Chave da SerpApi
+Painel da SerpApi → **Your Account** → *API Key* → Copy.
 
 ### 2. Senha de app do Gmail (pros alertas)
 1. Ative verificação em 2 etapas na conta Google.
 2. https://myaccount.google.com/apppasswords → crie "Monitor passagens" → guarde a senha de 16 letras.
 
 ### 3. Repositório no GitHub
-1. Crie um repositório **público** (Actions ilimitado; o CSV não tem dado sensível).
-2. Suba todos os arquivos desta pasta.
-3. **Settings → Secrets and variables → Actions**, crie os secrets:
-   - `TP_TOKEN` (token da Travelpayouts)
+1. Repositório **público** (Actions ilimitado; o CSV não tem dado sensível).
+2. **Settings → Secrets and variables → Actions**, crie os secrets:
+   - `SERP_KEY` (chave da SerpApi)
    - `MAIL_USER` (seu Gmail), `MAIL_PASS` (senha de app), `MAIL_TO` (quem recebe alerta)
-4. **Settings → Pages**: Deploy from a branch → `main` → pasta `/docs`. Dashboard em `https://SEU_USUARIO.github.io/NOME_DO_REPO/`.
-5. **Actions** → workflow **monitor-passagens** → *Run workflow* pra testar. Depois roda sozinho de hora em hora.
+3. **Settings → Pages**: Deploy from a branch → `main` → pasta `/docs`.
+4. **Actions** → workflow **monitor-passagens** → *Run workflow* pra testar. Depois roda sozinho todo dia às **09:00 BRT**.
+
+> Se você ainda tiver o secret `TP_TOKEN` da Travelpayouts, pode apagar — não é mais usado.
 
 ## Alertas por e-mail
 
-Nas rotas ida-e-volta (melhor preço) e nos **favoritos**:
+Sempre sobre o **custo total** (tarifa + bagagem), não sobre a tarifa seca:
 - 🔥 novo mínimo histórico;
 - 📉 queda ≥ 8% desde a última leitura (`alerta_queda_pct`);
 - 🎯 abaixo do seu teto (`alerta_limite_brl` por destino ou `limite_brl` por favorito).
 
-Sugestão: no favorito AA930, defina `"limite_brl": 5500` pra ser avisado quando voltar ao patamar que você já viu.
+Os favoritos casam pelo número exato do voo dentro do itinerário — `AD87` não dispara por causa de um `AD8700`.
 
 ## Dashboard
 
-- **Cards de cenário**: melhor preço por destino/data, RT vs. só ida + só volta, com Tampa somando R$ 1.800 de carro/estrada (`tampa_custo_extra_brl`).
-- **Melhores opções agora**: top 3 por consulta com companhia, horários (selo 🌅 chega manhã), duração (selo ≤11h) e link do Google Flights pronto pra conferir e comprar.
-- **⭐ Voos favoritos**: histórico de preço do itinerário exato vigiado.
-- **Evolução do preço** + **padrão por horário** e **por dia da semana** — com grade horária 24x/dia, em ~1 semana dá pra ver se existe hora mais barata de verdade.
+- **Cards "custo total na porta"**: uma por rota, ordenadas do melhor negócio pro pior, com o selo *melhor agora* e o alerta de horário inviável no TPA.
+- **Melhores opções agora**: top 3 por rota com companhia, aeroporto de conexão, horários, duração (selo ≤11h) e link do Google Flights pronto pra conferir e comprar.
+- **Evolução do custo** e **⭐ voos favoritos**: histórico diário.
+
+## Ajustes rápidos (`config.json`)
+
+| Quero… | Mexer em |
+|---|---|
+| mudar as datas | `data_ida` / `data_volta` |
+| monitorar outra rota ou mudar frequência | `rotas` (`dias` aceita `"todos"` ou lista com 0=seg … 6=dom) |
+| mudar o que conta como horário bom pro TPA | `tampa_janela` |
+| ser avisado a partir de um preço | `alerta_limite_brl` ou `limite_brl` do favorito |
+| apertar/afrouxar a cota | `orcamento_buscas_mes` |
+
+Sugestão: nos favoritos, defina `"limite_brl"` com o patamar que você já viu, pra ser avisado quando voltar a ele.
 
 ## Complemento recomendado (grátis)
 
-Ative também o **"Acompanhar preços" do Google Flights** no voo AA930+AA1693 e nas buscas GRU→MCO/TPA das suas datas — ele vigia o itinerário exato com o preço final de venda e completa o radar do robô.
+Ative também o **"Acompanhar preços" do Google Flights** nas suas datas — ele vigia o itinerário exato com o preço final de venda e completa o radar do robô.
