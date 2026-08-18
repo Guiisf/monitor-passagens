@@ -37,6 +37,19 @@ Cada linha do painel diz de onde veio o número:
 
 A escolha do piso é deliberada: usar o teto inflava tanto o custo que chegava a inverter a comparação entre rotas.
 
+### ⚠ Uma suposição que ainda precisa ser confirmada
+
+A API devolve a bagagem como texto puro — `"1st checked bag: 885"` — **sem dizer se o valor é por trecho ou pela viagem inteira**. O robô assume *viagem inteira* (`bagagem.valor_api_cobre: "viagem"`), porque o valor vem sob a chave `together`, que identifica a reserva feita como bloco único, e porque R$ 885 por trecho daria ~US$ 160 só na ida — caro demais para econômica.
+
+**Isso muda qual rota ganha.** Com os números reais de 18/08:
+
+| suposição | Avianca | American | ganha |
+|---|---|---|---|
+| cobre a viagem (atual) | R$ 7.995 | R$ 8.157 | Avianca |
+| cobre cada trecho | R$ 9.765 | R$ 9.615 | American |
+
+Para confirmar: abra o link do Google Flights de uma linha do painel e veja a taxa de bagagem na página de compra. Se for por trecho, troque `valor_api_cobre` para `"trecho"` — é uma linha, e o robô recalcula tudo na coleta seguinte. O rodapé do painel exibe qual suposição está valendo.
+
 ## Cota da SerpApi
 
 O free tier dá **250 buscas/mês**. Uma rota custa `1 + idas_exploradas` buscas: a 1ª chamada lista as idas, e cada ida explorada exige uma 2ª chamada (com `departure_token`) para fechar a volta com o preço do pacote.
