@@ -51,6 +51,18 @@ def _con_txt(via, conexoes) -> str:
     return "direto" if n == 0 else (f"{n} conexão" if n == 1 else f"{n} conexões")
 
 
+def custo_bagagem(cia: str, tipo: str, cfg: dict) -> float:
+    """Estimativa de bagagem despachada. Cias isentas (status/franquia) = R$ 0."""
+    bag = cfg.get("bagagem")
+    if not bag:
+        return 0.0
+    cias = {c.strip() for c in str(cia).split(",") if c.strip()}
+    if cias and cias.issubset(set(bag.get("cias_isentas", []))):
+        return 0.0
+    trechos = 2 if tipo == "RT" else 1
+    return bag.get("malas_total", 0) * bag.get("custo_por_mala_trecho_brl", 0) * trechos
+
+
 def chega_manha(chegada: str) -> bool:
     try:
         h = int(str(chegada)[:2])
@@ -150,16 +162,25 @@ def _tabela_opcoes(df: pd.DataFrame, cfg: dict) -> str:
             voos = r.voos_ida
         badge = '<span class="ok11">≤11h</span>' if ok11 else '<span class="no11">+11h</span>'
         sol = ' <span class="manha">🌅 chega manhã</span>' if manha else ""
+        bag = custo_bagagem(r.cia, r.tipo, cfg)
+        total = r.preco_total_brl + bag
+        if bag:
+            bag_html = f'<div class="sub">+ {brl(bag)} bagagem</div>'
+            total_html = f'<span class="com-bag">{brl(total)}</span>'
+        else:
+            bag_html = '<div class="sub bag-free">bagagem inclusa ✓</div>'
+            total_html = f'<span class="sem-bag">{brl(total)}</span>'
         linhas_html += (
             f'<tr><td>{rota}<div class="sub">{datas} · {via} · {voos}</div></td>'
             f'<td>{nome_cia(r.cia)}<div class="sub">{horario}{sol}</div></td>'
             f'<td>{dur} {badge}</td>'
-            f'<td class="preco-td">{brl(r.preco_total_brl)}</td>'
+            f'<td class="preco-td">{brl(r.preco_total_brl)}{bag_html}</td>'
+            f'<td class="preco-td">{total_html}</td>'
             f'<td><a href="{url}" target="_blank">abrir ↗</a></td></tr>'
         )
     return (
         '<table class="opcoes"><thead><tr><th>rota</th><th>companhia · horários</th>'
-        '<th>duração</th><th>preço 2 adultos</th><th>Google Flights</th></tr></thead>'
+        '<th>duração</th><th>tarifa 2 adultos</th><th>custo real c/ bagagem</th><th>Google Flights</th></tr></thead>'
         f"<tbody>{linhas_html}</tbody></table>"
     )
 
@@ -282,6 +303,9 @@ def gerar_dashboard(csv_path: Path, saida: Path, cfg: dict) -> None:
   table.opcoes td{{padding:9px 8px;border-bottom:1px solid {GRID};vertical-align:top}}
   table.opcoes .sub{{color:{MUT};font-size:11px;margin-top:2px}}
   .preco-td{{font-family:'IBM Plex Mono',monospace;color:{AMBER};white-space:nowrap}}
+  .com-bag{{color:{ROSE};font-weight:600}}
+  .sem-bag{{color:{TEAL};font-weight:600}}
+  .bag-free{{color:{TEAL}}}
   table.opcoes a{{color:{TEAL};text-decoration:none}}
   .manha{{color:{AMBER};font-size:10px;font-family:'IBM Plex Mono',monospace}}
   .ok11{{color:{TEAL};font-size:10px;font-family:'IBM Plex Mono',monospace}}
@@ -291,18 +315,18 @@ def gerar_dashboard(csv_path: Path, saida: Path, cfg: dict) -> None:
 <header>
   <div class="board">✈ Painel de preços · monitoramento automático</div>
   <h1>SÃO PAULO → ORLANDO / TAMPA</h1>
-  <div class="meta">última coleta {ultima} BRT · {n} leituras acumuladas · 2 adultos (2x tarifa individual do cache Aviasales) · até 1 conexão · tarifa base — confira a bagagem no link</div>
+  <div class="meta">última coleta {ultima} BRT · {n} leituras acumuladas · 2 adultos · até 1 conexão · coluna "custo real" já soma bagagem estimada (Azul = isenta pelo seu Safira)</div>
 </header>
 <main>
   <div class="cards">{cards}</div>
-  <h2>Melhores opções agora <span class="h2sub">top 3 de cada consulta · combine uma IDA com uma VOLTA de cias diferentes</span></h2>
+  <h2>Melhores opções agora <span class="h2sub">top 3 de cada consulta · coluna final = tarifa + bagagem estimada</span></h2>
   <div class="tabela-wrap">{tabela}</div>
   <div class="grafico">{fig1.to_html(full_html=False, include_plotlyjs="cdn")}</div>
   {('<div class="grafico">' + fig_fav.to_html(full_html=False, include_plotlyjs=False) + "</div>") if fig_fav is not None else ""}
   <div class="grafico">{fig2.to_html(full_html=False, include_plotlyjs=False)}</div>
   <div class="grafico">{fig3.to_html(full_html=False, include_plotlyjs=False)}</div>
 </main>
-<footer>gerado automaticamente pelo monitor · menores preços do cache Aviasales (Travelpayouts), tarifa base por 2 adultos · cenário Tampa soma {brl(cfg["tampa_custo_extra_brl"])} de carro/estrada</footer>
+<footer>gerado automaticamente pelo monitor · tarifa base do cache Aviasales (Travelpayouts) por 2 adultos · bagagem estimada em R$ {cfg.get("bagagem", {}).get("custo_por_mala_trecho_brl", 0)}/mala/trecho · cenário Tampa soma {brl(cfg["tampa_custo_extra_brl"])} de carro/estrada</footer>
 </body></html>"""
 
     saida.parent.mkdir(exist_ok=True)
