@@ -7,7 +7,7 @@ Robô que roda sozinho no **GitHub Actions**, consulta o **Google Flights via Se
 | Item | Valor |
 |---|---|
 | Datas | ida **23/09/2026**, volta **29/09/2026** (fixas) |
-| Passageiros | 2 adultos, econômica |
+| Passageiros | 2 adultos, econômica (o preço da API **já vem somado para os dois** — conferido contra o Google Voos em 18/08/2026) |
 | Formato | ida e volta fechado |
 | Conexões | até 1 |
 | Rotas | GRU→MCO e VCP→MCO (diárias, 2 idas exploradas) · GRU→TPA (seg/qua/sex) · VCP→TPA (seg) |

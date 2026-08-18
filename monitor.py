@@ -367,7 +367,10 @@ def buscar(origem: str, destino: str, n_idas: int = 1) -> list[dict]:
     for p, ida_segs, volta_segs in unicos[: n_final * 2]:
         ri, rv = _resumo_leg(ida_segs), _resumo_leg(volta_segs)
         cias = sorted(set(ri["cias"] + rv["cias"]))
-        # SerpApi devolve o preço já totalizado para os `adults` da busca.
+        # O preço já vem totalizado para os `adults` da busca — CONFERIDO em
+        # 18/08/2026 contra o Google Voos: o mesmo itinerário Avianca (AV86+AV118,
+        # 07:35->21:20) aparecia por R$ 3.113 para 1 adulto, e a API devolveu
+        # R$ 6.225 com adults=2. Não multiplicar por adultos.
         preco = float(p.get("price") or 0)
         bagagem, fonte = custo_bagagem(p.get("booking_token", ""), cias, origem, destino, base)
         candidatos.append({
