@@ -71,6 +71,8 @@
     "_nota": "Custo real vem do campo baggage_prices da SerpApi (1 chamada extra por itinerario), cacheado por cia+rota. 'custo_por_mala_trecho_brl' e so fallback quando a API nao informa.",
     "malas_total": 2,
     "custo_por_mala_trecho_brl": 380,
+    "valor_api_cobre": "viagem",
+    "_nota_cobertura": "SUPOSICAO A CONFIRMAR. A API devolve '1st checked bag: 885' sem dizer se e por trecho ou pela viagem toda. Adotado 'viagem' porque o valor vem sob a chave 'together' (reserva unica) e porque 885 por trecho daria ~US$ 160 so na ida. Se a pagina de compra mostrar a taxa POR TRECHO, trocar para 'trecho' que o custo dobra. Isso muda qual rota ganha: com 'viagem' a Avianca vence, com 'trecho' vence a American.",
     "cias_isentas": [
       "AD"
     ],
