@@ -236,7 +236,10 @@ def custo_bagagem(booking_token: str, cias: list[str], origem: str, destino: str
         return 0.0, "isenta"
 
     malas = bag.get("malas_total", 0)
+    # o fallback do config é declaradamente por trecho, então sempre dobra
     fallback = malas * bag.get("custo_por_mala_trecho_brl", 0) * 2
+    # já o valor da API cobre a viagem toda ou cada trecho — ver 'valor_api_cobre'
+    trechos_api = 2 if bag.get("valor_api_cobre") == "trecho" else 1
 
     chave = f"{'-'.join(sorted(cias_set))}|{origem}-{destino}"
     cache = _cache_bagagem()
@@ -244,7 +247,8 @@ def custo_bagagem(booking_token: str, cias: list[str], origem: str, destino: str
     if reg and (datetime.now(timezone.utc) - datetime.fromisoformat(reg["ts"])).days < bag.get("cache_dias", 14):
         if reg["mala"] is None:
             return fallback, "estimativa"
-        return reg["mala"] * malas * 2, "api-cache-faixa" if reg.get("faixa") else "api-cache"
+        return (reg["mala"] * malas * trechos_api,
+                "api-cache-faixa" if reg.get("faixa") else "api-cache")
 
     global _bagagem_novas
     if _bagagem_novas >= MAX_BAGAGEM_NOVAS:
@@ -280,7 +284,7 @@ def custo_bagagem(booking_token: str, cias: list[str], origem: str, destino: str
 
     if mala is None:
         return fallback, "estimativa"
-    return mala * malas * 2, "api-faixa" if faixa else "api"
+    return mala * malas * trechos_api, "api-faixa" if faixa else "api"
 
 
 # -------------------------------------------------------------- busca ---
