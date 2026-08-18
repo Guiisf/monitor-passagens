@@ -44,5 +44,13 @@
       "voos": "AD87",
       "limite_brl": 0
     }
-  ]
+  ],
+  "bagagem": {
+    "_nota": "Estimativa de bagagem despachada somada no dashboard. Cias em 'cias_isentas' saem com custo zero (ex.: AD=Azul, coberto pelo status Safira: 2 malas 23kg gratis Brasil<->EUA).",
+    "malas_total": 2,
+    "custo_por_mala_trecho_brl": 380,
+    "cias_isentas": [
+      "AD"
+    ]
+  }
 }
