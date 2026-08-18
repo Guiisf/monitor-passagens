@@ -6,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
 
+from monitor import regex_favorito
+
 # Paleta "painel de embarque"
 BG = "#0A1626"
 PANEL = "#101F33"
@@ -17,9 +19,6 @@ TEAL = "#3FD0B6"    # Tampa
 ROSE = "#FF7A9E"
 
 CORES_ROTA = {"MCO": AMBER, "TPA": TEAL}
-TRACO_DATA = {0: "solid", 1: "dot"}
-
-
 
 CIAS = {
     "LA": "LATAM", "CM": "Copa", "AD": "Azul", "G3": "GOL", "AA": "American",
@@ -40,6 +39,10 @@ def fmt_dur(minutos) -> str:
     return f"{m // 60}h{m % 60:02d}"
 
 
+def brl(v) -> str:
+    return "R$ " + f"{v:,.0f}".replace(",", ".") if v == v and v is not None else "—"
+
+
 def _con_txt(via, conexoes) -> str:
     """Texto da conexão: aeroporto se conhecido, senão a contagem."""
     if str(via) not in ("", "nan", "None"):
@@ -51,24 +54,41 @@ def _con_txt(via, conexoes) -> str:
     return "direto" if n == 0 else (f"{n} conexão" if n == 1 else f"{n} conexões")
 
 
-def custo_bagagem(cia: str, tipo: str, cfg: dict) -> float:
-    """Estimativa de bagagem despachada. Cias isentas (status/franquia) = R$ 0."""
-    bag = cfg.get("bagagem")
-    if not bag:
-        return 0.0
-    cias = {c.strip() for c in str(cia).split(",") if c.strip()}
-    if cias and cias.issubset(set(bag.get("cias_isentas", []))):
-        return 0.0
-    trechos = 2 if tipo == "RT" else 1
-    return bag.get("malas_total", 0) * bag.get("custo_por_mala_trecho_brl", 0) * trechos
-
-
-def chega_manha(chegada: str) -> bool:
+def _hora(txt) -> int | None:
     try:
-        h = int(str(chegada)[:2])
-    except ValueError:
+        return int(str(txt)[:2])
+    except (TypeError, ValueError):
+        return None
+
+
+def tampa_ok(chegada_ida, partida_volta, cfg: dict) -> bool:
+    """
+    TPA só é viável com 1h de estrada até Orlando dos dois lados:
+    chegar de manhã na ida e partir à tarde na volta.
+    """
+    j = cfg.get("tampa_janela", {})
+    ch_min, ch_max = j.get("chegada_ida_h", [5, 12])
+    pt_min, pt_max = j.get("partida_volta_h", [12, 19])
+    ch, pt = _hora(chegada_ida), _hora(partida_volta)
+    if ch is None or pt is None:
         return False
-    return 5 <= h < 12
+    return ch_min <= ch < ch_max and pt_min <= pt < pt_max
+
+
+def custo_extra(origem: str, destino: str, cfg: dict) -> tuple[float, list[str]]:
+    """Custos de solo que não estão na tarifa: Uber até VCP e carro/estrada de TPA."""
+    total, itens = 0.0, []
+    if origem == "VCP":
+        v = cfg.get("vcp_custo_extra_brl", 0)
+        if v:
+            total += v
+            itens.append(("Uber até VCP (+1h30)", v))
+    if destino == "TPA":
+        v = cfg.get("tampa_custo_extra_brl", 0)
+        if v:
+            total += v
+            itens.append(("carro/estrada de Tampa", v))
+    return total, itens
 
 
 def link_gf(origem, destino, ida, volta=None) -> str:
@@ -96,91 +116,83 @@ def _layout(fig: go.Figure, titulo: str, altura: int = 420) -> go.Figure:
     return fig
 
 
-def _cenarios(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
-    """Melhor preço atual por destino/data: RT fechado vs. só ida + só volta."""
+def _cenarios(df: pd.DataFrame, cfg: dict) -> list[dict]:
+    """Melhor opção atual de cada rota, já com bagagem e custo de solo somados."""
     ult = df[df["rank"] == 1].sort_values("ts_utc").groupby(
-        ["origem", "destino", "data_ida", "data_volta", "tipo"], as_index=False
+        ["origem", "destino"], as_index=False
     ).last()
 
     linhas = []
-    for d in cfg["destinos"]:
-        for ida, volta in cfg["datas"]:
-            rt = ult[(ult.tipo == "RT") & (ult.destino == d) & (ult.data_ida == ida)]
-            melhor_rt = rt.preco_total_brl.min() if len(rt) else None
-
-            so_ida = ult[(ult.tipo == "IDA") & (ult.destino == d) & (ult.data_ida == ida)]
-            so_volta = ult[(ult.tipo == "VOLTA") & (ult.origem == d) & (ult.data_volta == volta)]
-            melhor_ow = (
-                so_ida.preco_total_brl.min() + so_volta.preco_total_brl.min()
-                if len(so_ida) and len(so_volta) else None
-            )
-            extra = cfg["tampa_custo_extra_brl"] if d == "TPA" else 0
-            linhas.append(dict(
-                destino=d, ida=ida, volta=volta,
-                rt=melhor_rt, ow=melhor_ow, extra=extra,
-                total=(melhor_rt + extra) if melhor_rt else None,
-            ))
-    return pd.DataFrame(linhas)
-
-
-def brl(v) -> str:
-    return "R$ " + f"{v:,.0f}".replace(",", ".") if v == v and v is not None else "—"
-
-
+    for r in cfg["rotas"]:
+        g = ult[(ult.origem == r["origem"]) & (ult.destino == r["destino"])]
+        if not len(g):
+            continue
+        row = g.iloc[0]
+        extra, itens = custo_extra(r["origem"], r["destino"], cfg)
+        linhas.append(dict(
+            origem=r["origem"], destino=r["destino"], papel=r.get("papel", ""),
+            tarifa=row.preco_total_brl, bagagem=row.bagagem_brl,
+            bagagem_fonte=row.bagagem_fonte, extras=itens,
+            total=row.custo_total_brl + extra,
+            viavel=(tampa_ok(row.chegada_ida, row.partida_volta, cfg)
+                    if r["destino"] == "TPA" else True),
+        ))
+    linhas.sort(key=lambda x: x["total"])
+    return linhas
 
 
 def _tabela_opcoes(df: pd.DataFrame, cfg: dict) -> str:
-    """Tabela HTML com as melhores opções da coleta mais recente de cada consulta."""
+    """Tabela HTML com as melhores opções da coleta mais recente de cada rota."""
     max_min = cfg.get("max_duracao_voo_h", 11) * 60
-    ult_ts = df.groupby(["origem", "destino", "data_ida", "data_volta", "tipo"])["ts_utc"].transform("max")
+    ult_ts = df.groupby(["origem", "destino"])["ts_utc"].transform("max")
     atual = df[df.ts_utc == ult_ts].copy()
-    atual = atual[atual["rank"] <= 3].sort_values(["tipo", "preco_total_brl"])
+    atual = atual[atual["rank"] <= 3]
+    # ordena pelo custo na porta (com solo), senão VCP/TPA sobem indevidamente
+    atual = atual.assign(_solo=[custo_extra(o, d, cfg)[0] for o, d in
+                                zip(atual.origem, atual.destino)])
+    atual = atual.assign(_total=atual.custo_total_brl + atual._solo).sort_values("_total")
 
     linhas_html = ""
     for _, r in atual.iterrows():
-        if r.tipo == "RT":
-            rota = f"{r.origem}→{r.destino}→{r.origem}"
-            datas = f"{str(r.data_ida)[5:]} a {str(r.data_volta)[5:]}"
-            url = link_gf(r.origem, r.destino, r.data_ida, r.data_volta)
-            dur = f"{fmt_dur(r.duracao_ida)} / {fmt_dur(r.duracao_volta)}"
-            ok11 = (r.duracao_ida <= max_min) and (r.duracao_volta <= max_min)
-            via = f"ida {_con_txt(r.via_ida, r.conexoes_ida)} · volta {_con_txt(r.via_volta, r.conexoes_volta)}"
-            horario = f"{r.partida_ida}→{r.chegada_ida} / {r.partida_volta}→{r.chegada_volta}"
-            manha = chega_manha(r.chegada_ida)
-            voos = f"{r.voos_ida} / {r.voos_volta}"
-        else:
-            sentido = "IDA" if r.tipo == "IDA" else "VOLTA"
-            rota = f"{r.origem}→{r.destino} ({sentido.lower()})"
-            data_ref = r.data_ida if r.tipo == "IDA" else r.data_volta
-            datas = str(data_ref)[5:]
-            url = link_gf(r.origem, r.destino, data_ref)
-            dur = fmt_dur(r.duracao_ida)
-            ok11 = r.duracao_ida <= max_min
-            via = _con_txt(r.via_ida, r.conexoes_ida)
-            horario = f"{r.partida_ida}→{r.chegada_ida}"
-            manha = chega_manha(r.chegada_ida) if r.tipo == "IDA" else False
-            voos = r.voos_ida
+        rota = f"{r.origem}→{r.destino}→{r.origem}"
+        datas = f"{str(r.data_ida)[5:]} a {str(r.data_volta)[5:]}"
+        url = link_gf(r.origem, r.destino, r.data_ida, r.data_volta)
+        dur = f"{fmt_dur(r.duracao_ida)} / {fmt_dur(r.duracao_volta)}"
+        ok11 = (r.duracao_ida <= max_min) and (r.duracao_volta <= max_min)
+        via = f"ida {_con_txt(r.via_ida, r.conexoes_ida)} · volta {_con_txt(r.via_volta, r.conexoes_volta)}"
+        horario = f"{r.partida_ida}→{r.chegada_ida} / {r.partida_volta}→{r.chegada_volta}"
+        voos = f"{r.voos_ida} / {r.voos_volta}"
+
         badge = '<span class="ok11">≤11h</span>' if ok11 else '<span class="no11">+11h</span>'
-        sol = ' <span class="manha">🌅 chega manhã</span>' if manha else ""
-        bag = custo_bagagem(r.cia, r.tipo, cfg)
-        total = r.preco_total_brl + bag
-        if bag:
-            bag_html = f'<div class="sub">+ {brl(bag)} bagagem</div>'
-            total_html = f'<span class="com-bag">{brl(total)}</span>'
+        if r.destino == "TPA":
+            viavel = tampa_ok(r.chegada_ida, r.partida_volta, cfg)
+            sel_tpa = (' <span class="ok11">✓ estrada ok</span>' if viavel
+                       else ' <span class="no11">✗ horário ruim p/ estrada</span>')
         else:
+            sel_tpa = ""
+
+        if r.bagagem_brl == 0:
             bag_html = '<div class="sub bag-free">bagagem inclusa ✓</div>'
-            total_html = f'<span class="sem-bag">{brl(total)}</span>'
+        else:
+            fonte = "estimada" if r.bagagem_fonte == "estimativa" else "real"
+            bag_html = f'<div class="sub">+ {brl(r.bagagem_brl)} bagagem ({fonte})</div>'
+
+        extra, total = r._solo, r._total
+        extra_html = f'<div class="sub">+ {brl(extra)} solo</div>' if extra else ""
+        classe = "sem-bag" if r.bagagem_brl == 0 else "com-bag"
+
         linhas_html += (
             f'<tr><td>{rota}<div class="sub">{datas} · {via} · {voos}</div></td>'
-            f'<td>{nome_cia(r.cia)}<div class="sub">{horario}{sol}</div></td>'
+            f'<td>{nome_cia(r.cia)}<div class="sub">{horario}{sel_tpa}</div></td>'
             f'<td>{dur} {badge}</td>'
-            f'<td class="preco-td">{brl(r.preco_total_brl)}{bag_html}</td>'
-            f'<td class="preco-td">{total_html}</td>'
+            f'<td class="preco-td">{brl(r.preco_total_brl)}{bag_html}{extra_html}</td>'
+            f'<td class="preco-td"><span class="{classe}">{brl(total)}</span></td>'
             f'<td><a href="{url}" target="_blank">abrir ↗</a></td></tr>'
         )
     return (
         '<table class="opcoes"><thead><tr><th>rota</th><th>companhia · horários</th>'
-        '<th>duração</th><th>tarifa 2 adultos</th><th>custo real c/ bagagem</th><th>Google Flights</th></tr></thead>'
+        '<th>duração</th><th>tarifa 2 adultos</th><th>custo total na porta</th>'
+        '<th>Google Flights</th></tr></thead>'
         f"<tbody>{linhas_html}</tbody></table>"
     )
 
@@ -188,81 +200,65 @@ def _tabela_opcoes(df: pd.DataFrame, cfg: dict) -> str:
 def gerar_dashboard(csv_path: Path, saida: Path, cfg: dict) -> None:
     df = pd.read_csv(csv_path)
     df["ts_brt"] = pd.to_datetime(df["ts_brt"])
-    rt = df[(df.tipo == "RT") & (df["rank"] == 1)].copy()
-    rt["rota"] = rt.origem + "→" + rt.destino + " · " + rt.data_ida.str[5:].str.replace("-", "/")
+    rt = df[df["rank"] == 1].copy()
+    rt["rota"] = rt.origem + "→" + rt.destino
 
-    # ---- 1. série temporal ----
+    # ---- série temporal: custo total real (tarifa + bagagem) ----
     fig1 = go.Figure()
-    for i, (rota, g) in enumerate(rt.groupby("rota")):
+    for rota, g in rt.groupby("rota"):
         dest = rota.split("→")[1][:3]
         fig1.add_trace(go.Scatter(
-            x=g.ts_brt, y=g.preco_total_brl, name=rota, mode="lines+markers",
-            line=dict(color=CORES_ROTA.get(dest, ROSE), width=1.6,
-                      dash="dot" if "24/" in rota else "solid"),
-            marker=dict(size=4),
+            x=g.ts_brt, y=g.custo_total_brl, name=rota, mode="lines+markers",
+            line=dict(color=CORES_ROTA.get(dest, ROSE), width=1.8,
+                      dash="dot" if rota.startswith("VCP") else "solid"),
+            marker=dict(size=5),
         ))
-    _layout(fig1, "EVOLUÇÃO DO PREÇO — IDA E VOLTA · 2 ADULTOS · TARIFA BASE")
-
-    # ---- 2. padrão por hora do dia ----
-    por_hora = rt.groupby(["hora_brt", "destino"]).preco_total_brl.agg(["mean", "min"]).reset_index()
-    fig2 = go.Figure()
-    for d in por_hora.destino.unique():
-        g = por_hora[por_hora.destino == d]
-        fig2.add_trace(go.Bar(x=g.hora_brt, y=g["mean"], name=f"{d} · média",
-                              marker_color=CORES_ROTA.get(d, ROSE), opacity=0.85))
-    _layout(fig2, "PADRÃO POR HORÁRIO DA CONSULTA (BRT) — preço médio", 380)
-    fig2.update_xaxes(title="hora do dia", dtick=1)
-
-    # ---- 3. padrão por dia da semana ----
-    ordem = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    nomes = dict(zip(ordem, ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]))
-    por_dia = rt.groupby(["dia_semana_brt", "destino"]).preco_total_brl.mean().reset_index()
-    fig3 = go.Figure()
-    for d in por_dia.destino.unique():
-        g = por_dia[por_dia.destino == d].set_index("dia_semana_brt").reindex(ordem).reset_index()
-        fig3.add_trace(go.Bar(x=[nomes[x] for x in g.dia_semana_brt], y=g.preco_total_brl,
-                              name=d, marker_color=CORES_ROTA.get(d, ROSE), opacity=0.85))
-    _layout(fig3, "PADRÃO POR DIA DA SEMANA DA CONSULTA — preço médio", 380)
+    _layout(fig1, "EVOLUÇÃO DO CUSTO — IDA E VOLTA · 2 ADULTOS · TARIFA + BAGAGEM")
 
     # ---- cards de cenário ----
     cen = _cenarios(df, cfg)
     cards = ""
-    for _, r in cen.iterrows():
-        if r.rt is None:
-            continue
-        nome = "ORLANDO (MCO)" if r.destino == "MCO" else "TAMPA (TPA) + carro"
-        cor = CORES_ROTA[r.destino]
-        ow_html = brl(r.ow) if r.ow else "—"
-        extra_html = (
-            f'<div class="linha"><span>+ carro/estrada</span><b>{brl(r.extra)}</b></div>'
-            if r.extra else ""
+    for i, c in enumerate(cen):
+        nome = f"{c['origem']} → {'ORLANDO (MCO)' if c['destino'] == 'MCO' else 'TAMPA (TPA)'}"
+        cor = CORES_ROTA[c["destino"]]
+        selo = ""
+        if i == 0:
+            selo = '<span class="melhor">melhor agora</span>'
+        if not c["viavel"]:
+            selo = '<span class="invi">horário inviável p/ estrada</span>'
+        bag_txt = "inclusa ✓" if c["bagagem"] == 0 else brl(c["bagagem"])
+        extras_html = "".join(
+            f'<div class="linha"><span>+ {rot}</span><b>{brl(v)}</b></div>' for rot, v in c["extras"]
         )
         cards += f"""
         <div class="card" style="border-top:3px solid {cor}">
-          <div class="eyebrow">{nome} · {r.ida[8:]}/{r.ida[5:7]} → {r.volta[8:]}/{r.volta[5:7]}</div>
-          <div class="preco">{brl(r.rt)}</div>
-          <div class="linha"><span>ida e volta fechado</span><b>{brl(r.rt)}</b></div>
-          <div class="linha"><span>só ida + só volta</span><b>{ow_html}</b></div>
-          {extra_html}
-          <div class="linha total"><span>custo total do cenário</span><b>{brl(r.total)}</b></div>
+          <div class="eyebrow">{nome} {selo}</div>
+          <div class="preco">{brl(c['total'])}</div>
+          <div class="linha"><span>tarifa 2 adultos</span><b>{brl(c['tarifa'])}</b></div>
+          <div class="linha"><span>bagagem despachada</span><b>{bag_txt}</b></div>
+          {extras_html}
+          <div class="linha total"><span>custo total na porta</span><b>{brl(c['total'])}</b></div>
         </div>"""
 
     tabela = _tabela_opcoes(df, cfg)
 
-    # ---- favoritos: histórico de preço dos itinerários vigiados ----
+    # ---- favoritos ----
     fig_fav = None
     favs = cfg.get("favoritos", [])
-    if favs and "voos_ida" in df.columns:
+    if favs:
         fig_fav = go.Figure()
         tem_dado = False
         for i, fav in enumerate(favs):
             alvo = fav["voos"]
-            g = df[df.voos_ida.astype(str).str.startswith(alvo) | df.voos_volta.astype(str).str.startswith(alvo)].sort_values("ts_brt")
+            padrao = regex_favorito(alvo)
+            m = (df.voos_ida.astype(str).str.contains(padrao, regex=True)
+                 | df.voos_volta.astype(str).str.contains(padrao, regex=True))
+            g = df[m].sort_values("ts_brt")
             if not len(g):
                 continue
             tem_dado = True
             fig_fav.add_trace(go.Scatter(
-                x=g.ts_brt, y=g.preco_total_brl, name=fav.get("nome", alvo),
+                x=g.ts_brt, y=g.custo_total_brl, name=fav.get("nome", alvo),
                 mode="lines+markers", line=dict(color=[AMBER, TEAL, ROSE][i % 3], width=2),
                 marker=dict(size=5),
             ))
@@ -273,6 +269,8 @@ def gerar_dashboard(csv_path: Path, saida: Path, cfg: dict) -> None:
 
     ultima = df.ts_brt.max().strftime("%d/%m/%Y %H:%M")
     n = len(df)
+    ida_fmt = f"{cfg['data_ida'][8:]}/{cfg['data_ida'][5:7]}"
+    volta_fmt = f"{cfg['data_volta'][8:]}/{cfg['data_volta'][5:7]}"
 
     html = f"""<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8">
@@ -286,12 +284,14 @@ def gerar_dashboard(csv_path: Path, saida: Path, cfg: dict) -> None:
   h1{{margin:6px 0 4px;font-family:'IBM Plex Mono',monospace;font-size:clamp(19px,4vw,26px);letter-spacing:.04em}}
   .meta{{color:{MUT};font-size:12px;font-family:'IBM Plex Mono',monospace}}
   main{{max-width:1080px;margin:0 auto;padding:20px 16px 60px}}
-  .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:18px 0 26px}}
+  .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:18px 0 26px}}
   .card{{background:{PANEL};border-radius:10px;padding:16px 18px}}
   .eyebrow{{font-family:'IBM Plex Mono',monospace;font-size:11px;color:{MUT};letter-spacing:.12em}}
+  .melhor{{color:{BG};background:{TEAL};border-radius:3px;padding:1px 5px;font-size:9.5px;letter-spacing:.06em;margin-left:4px}}
+  .invi{{color:{BG};background:{ROSE};border-radius:3px;padding:1px 5px;font-size:9.5px;letter-spacing:.06em;margin-left:4px}}
   .preco{{font-family:'IBM Plex Mono',monospace;font-size:30px;font-weight:600;margin:8px 0 12px;color:{TXT}}}
-  .linha{{display:flex;justify-content:space-between;font-size:12.5px;color:{MUT};padding:3px 0}}
-  .linha b{{color:{TXT};font-family:'IBM Plex Mono',monospace;font-weight:400}}
+  .linha{{display:flex;justify-content:space-between;font-size:12.5px;color:{MUT};padding:3px 0;gap:10px}}
+  .linha b{{color:{TXT};font-family:'IBM Plex Mono',monospace;font-weight:400;white-space:nowrap}}
   .linha.total{{border-top:1px solid {GRID};margin-top:8px;padding-top:8px}}
   .linha.total b{{color:{AMBER}}}
   .grafico{{background:{PANEL};border-radius:10px;margin-bottom:18px;overflow:hidden}}
@@ -307,26 +307,27 @@ def gerar_dashboard(csv_path: Path, saida: Path, cfg: dict) -> None:
   .sem-bag{{color:{TEAL};font-weight:600}}
   .bag-free{{color:{TEAL}}}
   table.opcoes a{{color:{TEAL};text-decoration:none}}
-  .manha{{color:{AMBER};font-size:10px;font-family:'IBM Plex Mono',monospace}}
   .ok11{{color:{TEAL};font-size:10px;font-family:'IBM Plex Mono',monospace}}
   .no11{{color:{ROSE};font-size:10px;font-family:'IBM Plex Mono',monospace}}
-  footer{{color:{MUT};font-size:11px;text-align:center;padding:14px;font-family:'IBM Plex Mono',monospace}}
+  footer{{color:{MUT};font-size:11px;text-align:center;padding:14px;font-family:'IBM Plex Mono',monospace;line-height:1.7}}
 </style></head><body>
 <header>
   <div class="board">✈ Painel de preços · monitoramento automático</div>
   <h1>SÃO PAULO → ORLANDO / TAMPA</h1>
-  <div class="meta">última coleta {ultima} BRT · {n} leituras acumuladas · 2 adultos · até 1 conexão · coluna "custo real" já soma bagagem estimada (Azul = isenta pelo seu Safira)</div>
+  <div class="meta">última coleta {ultima} BRT · {n} leituras acumuladas · ida {ida_fmt} · volta {volta_fmt} · 2 adultos · até 1 conexão</div>
 </header>
 <main>
+  <h2>Custo total na porta <span class="h2sub">tarifa + bagagem despachada + custo de solo (Uber até VCP, carro de Tampa) — comparação justa entre as rotas</span></h2>
   <div class="cards">{cards}</div>
-  <h2>Melhores opções agora <span class="h2sub">top 3 de cada consulta · coluna final = tarifa + bagagem estimada</span></h2>
+  <h2>Melhores opções agora <span class="h2sub">top 3 de cada rota · Azul sai com bagagem inclusa pelo seu Safira</span></h2>
   <div class="tabela-wrap">{tabela}</div>
   <div class="grafico">{fig1.to_html(full_html=False, include_plotlyjs="cdn")}</div>
   {('<div class="grafico">' + fig_fav.to_html(full_html=False, include_plotlyjs=False) + "</div>") if fig_fav is not None else ""}
-  <div class="grafico">{fig2.to_html(full_html=False, include_plotlyjs=False)}</div>
-  <div class="grafico">{fig3.to_html(full_html=False, include_plotlyjs=False)}</div>
 </main>
-<footer>gerado automaticamente pelo monitor · tarifa base do cache Aviasales (Travelpayouts) por 2 adultos · bagagem estimada em R$ {cfg.get("bagagem", {}).get("custo_por_mala_trecho_brl", 0)}/mala/trecho · cenário Tampa soma {brl(cfg["tampa_custo_extra_brl"])} de carro/estrada</footer>
+<footer>
+  gerado automaticamente pelo monitor · preços do Google Flights via SerpApi · bagagem real do campo baggage_prices (fallback R$ {cfg.get("bagagem", {}).get("custo_por_mala_trecho_brl", 0)}/mala/trecho quando a API não informa)<br>
+  Tampa só conta como opção se o voo chegar de manhã e partir à tarde — 1h de estrada até Orlando de cada lado
+</footer>
 </body></html>"""
 
     saida.parent.mkdir(exist_ok=True)
