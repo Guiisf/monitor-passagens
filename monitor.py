@@ -264,6 +264,11 @@ def custo_bagagem(booking_token: str, cias: list[str], origem: str, destino: str
                 if isinstance(alvo, dict) and alvo.get("baggage_prices"):
                     precos = alvo["baggage_prices"]
                     break
+        # DIAGNÓSTICO: os valores vindos da API (AV R$ 885, AA R$ 729 por mala)
+        # parecem altos demais, e a fórmula multiplica por 2 malas x 2 trechos.
+        # Logar a string crua é o único jeito de saber se o número já é do
+        # trajeto todo ou já cobre o casal, antes de mexer na multiplicação.
+        print(f"[BAG-RAW] {chave}: {json.dumps(precos, ensure_ascii=False)[:400]}")
         mala, faixa = _preco_mala(precos)
     except Exception as e:  # noqa: BLE001 — bagagem não pode derrubar a coleta
         # falha transitória não vai pro cache: tenta de novo na próxima rodada
@@ -341,15 +346,18 @@ def buscar(origem: str, destino: str, n_idas: int = 1) -> list[dict]:
             print(f"[FILTRO] {origem}->{destino}: {antes - len(unicos)} opções acima de "
                   f"{fator}x R$ {piso:,.0f} descartadas")
 
-    opcoes = []
-    for rank, (p, ida_segs, volta_segs) in enumerate(unicos[: CFG.get("opcoes_por_consulta", 5)], start=1):
+    n_final = CFG.get("opcoes_por_consulta", 5)
+    # Avalia um pool maior que o top-N final: uma tarifa mais cara pode vencer no
+    # total se a bagagem for mais barata. Como a bagagem é cacheada por cia+rota,
+    # o pool extra quase nunca custa chamada nova.
+    candidatos = []
+    for p, ida_segs, volta_segs in unicos[: n_final * 2]:
         ri, rv = _resumo_leg(ida_segs), _resumo_leg(volta_segs)
         cias = sorted(set(ri["cias"] + rv["cias"]))
         # SerpApi devolve o preço já totalizado para os `adults` da busca.
         preco = float(p.get("price") or 0)
         bagagem, fonte = custo_bagagem(p.get("booking_token", ""), cias, origem, destino, base)
-        opcoes.append({
-            "rank": rank,
+        candidatos.append({
             "preco": round(preco, 2),
             "bagagem": round(bagagem, 2),
             "bagagem_fonte": fonte,
@@ -362,6 +370,14 @@ def buscar(origem: str, destino: str, n_idas: int = 1) -> list[dict]:
             "conexoes_ida": ri["conexoes"], "conexoes_volta": rv["conexoes"],
             "duracao_ida": ri["duracao"], "duracao_volta": rv["duracao"],
         })
+
+    # Ranqueia pelo CUSTO TOTAL, não pela tarifa: é o critério de decisão, e a
+    # tarifa sozinha já inverteu a ordem na prática (Avianca com tarifa menor
+    # perdia da American depois de somar bagagem).
+    candidatos.sort(key=lambda o: o["custo_total"])
+    opcoes = []
+    for rank, o in enumerate(candidatos[:n_final], start=1):
+        opcoes.append({"rank": rank, **o})
     return opcoes
 
 
