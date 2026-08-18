@@ -1,33 +1,47 @@
 {
-  "origens": [
-    "GRU",
-    "VCP"
+  "_nota": "Datas fixas, ida e volta fechado. Prioridade: chegar em MCO saindo de GRU. VCP e TPA sao comparativos.",
+  "rotas": [
+    {
+      "origem": "GRU",
+      "destino": "MCO",
+      "papel": "principal",
+      "dias": "todos"
+    },
+    {
+      "origem": "GRU",
+      "destino": "TPA",
+      "papel": "comparativo",
+      "dias": "todos"
+    },
+    {
+      "origem": "VCP",
+      "destino": "MCO",
+      "papel": "comparativo",
+      "dias": "todos",
+      "_nota": "diario apesar de comparativo: e a rota do favorito AD87 (Azul direto)"
+    },
+    {
+      "origem": "VCP",
+      "destino": "TPA",
+      "papel": "comparativo",
+      "dias": [0, 3],
+      "_nota": "seg e qui apenas: dupla penalidade (Uber ate VCP + estrada de TPA), so vale se despencar"
+    }
   ],
-  "origens_one_way": [
-    "GRU",
-    "VCP",
-    "CGH"
-  ],
-  "destinos": [
-    "MCO",
-    "TPA"
-  ],
-  "datas": [
-    [
-      "2026-09-23",
-      "2026-09-29"
-    ],
-    [
-      "2026-09-24",
-      "2026-09-30"
-    ]
-  ],
+  "data_ida": "2026-09-23",
+  "data_volta": "2026-09-29",
   "adultos": 2,
   "moeda": "BRL",
   "max_conexoes": 1,
   "opcoes_por_consulta": 5,
   "max_duracao_voo_h": 11,
+  "vcp_custo_extra_brl": 200,
   "tampa_custo_extra_brl": 1800,
+  "tampa_janela": {
+    "_nota": "TPA so serve se der pra dirigir 1h ate Orlando com folga: chegar de manha e partir a tarde.",
+    "chegada_ida_h": [5, 12],
+    "partida_volta_h": [12, 19]
+  },
   "alerta_queda_pct": 8,
   "alerta_limite_brl": {
     "MCO": 0,
@@ -40,17 +54,19 @@
       "limite_brl": 0
     },
     {
-      "nome": "Azul direto VCP→MCO (Safira: 2 malas grátis)",
+      "nome": "Azul direto VCP->MCO (Safira: 2 malas gratis)",
       "voos": "AD87",
       "limite_brl": 0
     }
   ],
   "bagagem": {
-    "_nota": "Estimativa de bagagem despachada somada no dashboard. Cias em 'cias_isentas' saem com custo zero (ex.: AD=Azul, coberto pelo status Safira: 2 malas 23kg gratis Brasil<->EUA).",
+    "_nota": "Custo real vem do campo baggage_prices da SerpApi (1 chamada extra por itinerario), cacheado por cia+rota. 'custo_por_mala_trecho_brl' e so fallback quando a API nao informa.",
     "malas_total": 2,
     "custo_por_mala_trecho_brl": 380,
     "cias_isentas": [
       "AD"
-    ]
-  }
+    ],
+    "cache_dias": 14
+  },
+  "orcamento_buscas_mes": 250
 }
