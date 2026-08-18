@@ -37,7 +37,14 @@ jobs:
         run: |
           git config user.name "monitor-bot"
           git config user.email "bot@users.noreply.github.com"
-          git pull --rebase
+          # commit ANTES do pull: o monitor reescreve docs/index.html a cada
+          # execucao, e `git pull --rebase` aborta com exit 128 se houver
+          # alteracao nao commitada em arquivo rastreado
           git add -A
-          git commit -m "coleta $(date -u +'%Y-%m-%d %H:%M UTC')" || echo "nada novo"
+          if git diff --cached --quiet; then
+            echo "nada novo para commitar"
+            exit 0
+          fi
+          git commit -m "coleta $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git pull --rebase
           git push
