@@ -1,31 +1,36 @@
 {
-  "_nota": "Datas fixas, ida e volta fechado. Prioridade: chegar em MCO saindo de GRU. VCP e TPA sao comparativos.",
+  "_nota": "Datas fixas, ida e volta fechado. Prioridade: chegar em MCO saindo de GRU. VCP e TPA sao comparativos. 'idas_exploradas' = quantas opcoes de ida ganham uma 2a chamada para fechar a volta; cada ida extra custa 1 busca, mas so olhar a ida mais barata escondia combinacoes melhores.",
   "rotas": [
     {
       "origem": "GRU",
       "destino": "MCO",
       "papel": "principal",
-      "dias": "todos"
-    },
-    {
-      "origem": "GRU",
-      "destino": "TPA",
-      "papel": "comparativo",
-      "dias": "todos"
+      "dias": "todos",
+      "idas_exploradas": 2
     },
     {
       "origem": "VCP",
       "destino": "MCO",
       "papel": "comparativo",
       "dias": "todos",
-      "_nota": "diario apesar de comparativo: e a rota do favorito AD87 (Azul direto)"
+      "idas_exploradas": 2,
+      "_nota": "diario e com 2 idas: e a rota do favorito AD8706 (Azul direto) e onde a isencao de bagagem do Safira pesa mais"
+    },
+    {
+      "origem": "GRU",
+      "destino": "TPA",
+      "papel": "comparativo",
+      "dias": [0, 2, 4],
+      "idas_exploradas": 1,
+      "_nota": "seg/qua/sex: TPA e comparativo e ainda depende de horario bom pra estrada"
     },
     {
       "origem": "VCP",
       "destino": "TPA",
       "papel": "comparativo",
-      "dias": [0, 3],
-      "_nota": "seg e qui apenas: dupla penalidade (Uber ate VCP + estrada de TPA), so vale se despencar"
+      "dias": [0],
+      "idas_exploradas": 1,
+      "_nota": "so segunda: dupla penalidade (Uber ate VCP + estrada de TPA), so vale se despencar"
     }
   ],
   "data_ida": "2026-09-23",
@@ -34,6 +39,8 @@
   "moeda": "BRL",
   "max_conexoes": 1,
   "opcoes_por_consulta": 5,
+  "max_fator_preco": 2.5,
+  "_nota_fator": "Descarta opcoes acima de 2.5x a mais barata da rota: sao tarifas premium que vazam da busca por economica e nunca serao a resposta.",
   "max_duracao_voo_h": 11,
   "vcp_custo_extra_brl": 200,
   "tampa_custo_extra_brl": 1800,
@@ -55,8 +62,9 @@
     },
     {
       "nome": "Azul direto VCP->MCO (Safira: 2 malas gratis)",
-      "voos": "AD87",
-      "limite_brl": 0
+      "voos": "AD8706",
+      "limite_brl": 0,
+      "_nota": "era AD87 e nao casava com nada: o direto VCP->MCO que a API devolve e o AD8706"
     }
   ],
   "bagagem": {
