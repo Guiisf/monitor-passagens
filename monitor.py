@@ -196,8 +196,13 @@ def _valores(txt: str) -> list[float]:
     return out
 
 
-def _preco_mala(linhas) -> float | None:
-    """Custo da 1ª mala despachada, por trecho e por pessoa. Faixa -> pior caso."""
+def _preco_mala(linhas) -> tuple[float | None, bool]:
+    """
+    Custo da 1ª mala despachada, por trecho e por pessoa. Devolve (valor, é_faixa).
+
+    Quando a API devolve faixa ("265-885", tarifas diferentes da mesma cia), usa o
+    piso: o teto inflava o custo a ponto de inverter a comparação entre rotas.
+    """
     if isinstance(linhas, dict):
         linhas = [t for v in linhas.values() for t in (v if isinstance(v, list) else [v])]
     for linha in linhas or []:
@@ -209,10 +214,10 @@ def _preco_mala(linhas) -> float | None:
         limpo = re.sub(r"\b\d+\s+(free|gr[áa]tis)\b", " free ", limpo, flags=re.I)
         vals = _valores(limpo)
         if vals:
-            return max(vals)
+            return min(vals), len(set(vals)) > 1
         if re.search(r"free|gr[áa]tis|inclu", limpo, re.I):
-            return 0.0
-    return None
+            return 0.0, False
+    return None, False
 
 
 def custo_bagagem(booking_token: str, cias: list[str], origem: str, destino: str,
@@ -239,7 +244,7 @@ def custo_bagagem(booking_token: str, cias: list[str], origem: str, destino: str
     if reg and (datetime.now(timezone.utc) - datetime.fromisoformat(reg["ts"])).days < bag.get("cache_dias", 14):
         if reg["mala"] is None:
             return fallback, "estimativa"
-        return reg["mala"] * malas * 2, "api-cache"
+        return reg["mala"] * malas * 2, "api-cache-faixa" if reg.get("faixa") else "api-cache"
 
     global _bagagem_novas
     if _bagagem_novas >= MAX_BAGAGEM_NOVAS:
@@ -259,23 +264,30 @@ def custo_bagagem(booking_token: str, cias: list[str], origem: str, destino: str
                 if isinstance(alvo, dict) and alvo.get("baggage_prices"):
                     precos = alvo["baggage_prices"]
                     break
-        mala = _preco_mala(precos)
+        mala, faixa = _preco_mala(precos)
     except Exception as e:  # noqa: BLE001 — bagagem não pode derrubar a coleta
         # falha transitória não vai pro cache: tenta de novo na próxima rodada
         print(f"[BAG] falha em {chave}: {e}", file=sys.stderr)
         return fallback, "estimativa"
 
-    cache[chave] = {"ts": datetime.now(timezone.utc).isoformat(), "mala": mala}
+    cache[chave] = {"ts": datetime.now(timezone.utc).isoformat(), "mala": mala, "faixa": faixa}
     _grava_cache_bagagem(cache)
 
     if mala is None:
         return fallback, "estimativa"
-    return mala * malas * 2, "api"
+    return mala * malas * 2, "api-faixa" if faixa else "api"
 
 
 # -------------------------------------------------------------- busca ---
-def buscar(origem: str, destino: str) -> list[dict]:
-    """Melhores pacotes ida-e-volta da rota. Consome 2 buscas + bagagem não cacheada."""
+def buscar(origem: str, destino: str, n_idas: int = 1) -> list[dict]:
+    """
+    Melhores pacotes ida-e-volta da rota. Consome 1 + n_idas buscas, mais a
+    bagagem não cacheada.
+
+    Cada ida explorada rende um conjunto próprio de voltas: olhar só a ida mais
+    barata escondia combinações melhores (uma ida R$ 200 mais cara pode abrir
+    voltas R$ 2.000 mais baratas).
+    """
     base = _params_base(origem, destino)
     ida_j = _serp(base)
     idas = (ida_j.get("best_flights") or []) + (ida_j.get("other_flights") or [])
@@ -283,31 +295,54 @@ def buscar(origem: str, destino: str) -> list[dict]:
     if not idas:
         return []
 
-    # a ida mais barata define o token; a 2ª chamada traz as voltas com preço fechado
     idas.sort(key=lambda o: float(o.get("price") or 10**9))
-    token = idas[0].get("departure_token")
-    if not token:
-        print(f"[AVISO] {origem}->{destino}: sem departure_token", file=sys.stderr)
-        return []
-
-    volta_j = _serp(dict(base, departure_token=token))
-    pacotes = (volta_j.get("best_flights") or []) + (volta_j.get("other_flights") or [])
-    print(f"[API] {origem}->{destino}: {len(pacotes)} pacotes fechados")
-
     max_con = CFG["max_conexoes"]
     validos = []
-    for p in pacotes:
-        segs = p.get("flights") or []
-        ida_segs, volta_segs = _separar_legs(segs, origem, destino)
-        if not ida_segs:
-            ida_segs = idas[0].get("flights") or []
-        if len(ida_segs) - 1 > max_con or len(volta_segs) - 1 > max_con:
+
+    for i, ida in enumerate(idas[:n_idas], start=1):
+        token = ida.get("departure_token")
+        if not token:
+            print(f"[AVISO] {origem}->{destino}: ida {i} sem departure_token", file=sys.stderr)
             continue
-        validos.append((p, ida_segs, volta_segs))
+        volta_j = _serp(dict(base, departure_token=token))
+        pacotes = (volta_j.get("best_flights") or []) + (volta_j.get("other_flights") or [])
+        print(f"[API] {origem}->{destino}: ida {i}/{min(n_idas, len(idas))} -> {len(pacotes)} pacotes")
+        for p in pacotes:
+            segs = p.get("flights") or []
+            ida_segs, volta_segs = _separar_legs(segs, origem, destino)
+            if not ida_segs:
+                ida_segs = ida.get("flights") or []
+            if len(ida_segs) - 1 > max_con or len(volta_segs) - 1 > max_con:
+                continue
+            validos.append((p, ida_segs, volta_segs))
+
+    if not validos:
+        return []
 
     validos.sort(key=lambda t: float(t[0].get("price") or 10**9))
+
+    # idas diferentes podem devolver o mesmo pacote: fica o 1º (mais barato)
+    vistos, unicos = set(), []
+    for p, ida_segs, volta_segs in validos:
+        chave = (",".join(_cod_voo(s) for s in ida_segs),
+                 ",".join(_cod_voo(s) for s in volta_segs))
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        unicos.append((p, ida_segs, volta_segs))
+
+    # corta tarifas premium que vazam da busca por econômica e nunca serão a resposta
+    fator = CFG.get("max_fator_preco", 0)
+    if fator:
+        piso = float(unicos[0][0].get("price") or 0)
+        antes = len(unicos)
+        unicos = [t for t in unicos if float(t[0].get("price") or 0) <= piso * fator]
+        if antes > len(unicos):
+            print(f"[FILTRO] {origem}->{destino}: {antes - len(unicos)} opções acima de "
+                  f"{fator}x R$ {piso:,.0f} descartadas")
+
     opcoes = []
-    for rank, (p, ida_segs, volta_segs) in enumerate(validos[: CFG.get("opcoes_por_consulta", 5)], start=1):
+    for rank, (p, ida_segs, volta_segs) in enumerate(unicos[: CFG.get("opcoes_por_consulta", 5)], start=1):
         ri, rv = _resumo_leg(ida_segs), _resumo_leg(volta_segs)
         cias = sorted(set(ri["cias"] + rv["cias"]))
         # SerpApi devolve o preço já totalizado para os `adults` da busca.
@@ -362,7 +397,7 @@ def coletar(rotas: list[dict]) -> list[dict]:
     for r in rotas:
         origem, destino = r["origem"], r["destino"]
         try:
-            opcoes = buscar(origem, destino)
+            opcoes = buscar(origem, destino, r.get("idas_exploradas", 1))
         except Exception as e:  # noqa: BLE001 — uma rota quebrada não para as outras
             print(f"[ERRO] {origem}->{destino}: {e}", file=sys.stderr)
             continue
@@ -493,7 +528,7 @@ def main() -> None:
     orcamento = CFG.get("orcamento_buscas_mes", 250)
 
     rotas = rotas_do_dia(agora_brt)
-    estimativa = len(rotas) * 2
+    estimativa = sum(1 + r.get("idas_exploradas", 1) for r in rotas)
     if usado + estimativa > orcamento:
         aviso = (f"⚠️ Coleta pulada: cota SerpApi de {orcamento} buscas/mês quase no fim "
                  f"({usado} usadas, mais {estimativa} nesta rodada). Volta no dia 1º.")
