@@ -10,9 +10,9 @@ Robô que roda sozinho no **GitHub Actions**, consulta o **Google Flights via Se
 | Passageiros | 2 adultos, econômica |
 | Formato | ida e volta fechado |
 | Conexões | até 1 |
-| Rotas | GRU→MCO, GRU→TPA, VCP→MCO (diárias) · VCP→TPA (seg e qui) |
+| Rotas | GRU→MCO e VCP→MCO (diárias, 2 idas exploradas) · GRU→TPA (seg/qua/sex) · VCP→TPA (seg) |
 | Opções | top 5 de cada rota, com companhia, voos, aeroporto de conexão, horários e duração |
-| Favoritos | AA930 e AD87, com alerta próprio |
+| Favoritos | AA930 e AD8706, com alerta próprio |
 
 ### Prioridades embutidas no dashboard
 
@@ -25,18 +25,31 @@ Robô que roda sozinho no **GitHub Actions**, consulta o **Google Flights via Se
 
 Você é **Safira na Azul**, então voos Azul saem com **bagagem inclusa** (`cias_isentas: ["AD"]`) e custo zero no painel.
 
-Nas demais companhias o robô lê o campo `baggage_prices` da SerpApi e calcula `2 malas × valor real × 2 trechos`. Como esse campo só existe na resposta de *booking options* (uma chamada a mais por itinerário), o valor é **cacheado por companhia + rota** em `data/bagagem_cache.json` e revalidado a cada 14 dias — taxa de bagagem não muda de hora em hora. Quando a API não informa, cai no fallback de `custo_por_mala_trecho_brl` (R$ 380) e a linha aparece marcada como *estimada* em vez de *real*.
+Nas demais companhias o robô lê o campo `baggage_prices` da SerpApi e calcula `2 malas × valor real × 2 trechos`. Como esse campo só existe na resposta de *booking options* (uma chamada a mais por itinerário), o valor é **cacheado por companhia + rota** em `data/bagagem_cache.json` e revalidado a cada 14 dias — taxa de bagagem não muda de hora em hora.
+
+Cada linha do painel diz de onde veio o número:
+
+| Rótulo | Significado |
+|---|---|
+| *real* | valor único informado pela API |
+| *piso da faixa* | a API devolveu faixa (ex.: "265-885", tarifas diferentes da mesma cia) e o painel usa o piso |
+| *estimada* | a API não informou; usa o fallback `custo_por_mala_trecho_brl` (R$ 380) |
+
+A escolha do piso é deliberada: usar o teto inflava tanto o custo que chegava a inverter a comparação entre rotas.
 
 ## Cota da SerpApi
 
-O free tier dá **250 buscas/mês** e cada rota ida-e-volta consome **2 buscas** (o Google Flights exige uma 2ª chamada, com `departure_token`, para fechar a volta com o preço do pacote).
+O free tier dá **250 buscas/mês**. Uma rota custa `1 + idas_exploradas` buscas: a 1ª chamada lista as idas, e cada ida explorada exige uma 2ª chamada (com `departure_token`) para fechar a volta com o preço do pacote.
+
+**Por que explorar mais de uma ida:** olhar só a ida mais barata engana. Na primeira coleta real, VCP→MCO fechou em R$ 13.891 porque a ida mais barata da Azul só combinava com voltas caras. Uma ida R$ 200 mais cara pode abrir voltas R$ 2.000 mais baratas — por isso as duas rotas MCO exploram 2 idas.
 
 | Dia | Rotas | Buscas |
 |---|---|---|
-| seg e qui | 4 | 8 |
-| demais dias | 3 | 6 |
+| segunda | 4 | 10 |
+| qua e sex | 3 | 8 |
+| demais dias | 2 | 6 |
 
-≈ **198 buscas/mês** em coleta, mais alguns créditos esporádicos de bagagem quando o cache expira — sobra folga para testes manuais.
+≈ **217 buscas/mês** em coleta, mais alguns créditos esporádicos de bagagem quando o cache expira.
 
 O consumo é contado em `data/uso_serpapi.json`. Se a rodada do dia fosse estourar `orcamento_buscas_mes`, o robô **pula a coleta e te avisa por e-mail** em vez de falhar silenciosamente.
 
@@ -80,6 +93,8 @@ Os favoritos casam pelo número exato do voo dentro do itinerário — `AD87` n�
 |---|---|
 | mudar as datas | `data_ida` / `data_volta` |
 | monitorar outra rota ou mudar frequência | `rotas` (`dias` aceita `"todos"` ou lista com 0=seg … 6=dom) |
+| procurar mais combinações numa rota | `idas_exploradas` da rota (cada +1 custa 1 busca por coleta) |
+| deixar passar tarifas mais caras no painel | `max_fator_preco` (padrão 2.5x a mais barata da rota) |
 | mudar o que conta como horário bom pro TPA | `tampa_janela` |
 | ser avisado a partir de um preço | `alerta_limite_brl` ou `limite_brl` do favorito |
 | apertar/afrouxar a cota | `orcamento_buscas_mes` |
