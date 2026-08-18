@@ -65,7 +65,16 @@ def brl(v) -> str:
 
 # -------------------------------------------------------------- serpapi io ---
 def _serp(params: dict) -> dict:
-    """Uma chamada à SerpApi. Cada chamada consome 1 busca da cota mensal."""
+    """
+    Uma chamada à SerpApi.
+
+    O contador é um TETO, não o valor exato cobrado: a SerpApi serve buscas
+    idênticas repetidas em janela curta do cache dela, sem debitar da cota.
+    Com uma coleta por dia isso não acontece (as buscas ficam 24h distantes),
+    mas várias execuções seguidas — depuração, testes manuais — inflam o
+    contador. Errar para cima é o lado seguro num guarda de cota; para
+    reconciliar, veja o valor real em https://serpapi.com/account.
+    """
     global _creditos
     p = dict(params, engine="google_flights", api_key=os.environ["SERP_KEY"])
     r = requests.get(SERP_URL, params=p, timeout=90)
