@@ -66,6 +66,8 @@ O free tier dá **250 buscas/mês**. Uma rota custa `1 + idas_exploradas` buscas
 
 O consumo é contado em `data/uso_serpapi.json`. Se a rodada do dia fosse estourar `orcamento_buscas_mes`, o robô **pula a coleta e te avisa por e-mail** em vez de falhar silenciosamente.
 
+Esse contador é um **teto**, não o valor exato cobrado: a SerpApi serve buscas idênticas repetidas em janela curta do cache dela, de graça. Com uma coleta por dia isso não acontece, mas várias execuções manuais seguidas inflam o número. Se ele divergir do painel em https://serpapi.com/account, o valor do painel é o certo — basta editar o arquivo.
+
 ## Passo a passo
 
 ### 1. Chave da SerpApi
