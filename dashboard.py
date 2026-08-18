@@ -335,7 +335,8 @@ def gerar_dashboard(csv_path: Path, saida: Path, cfg: dict) -> None:
 </main>
 <footer>
   gerado automaticamente pelo monitor · preços do Google Flights via SerpApi · bagagem real do campo baggage_prices (fallback R$ {cfg.get("bagagem", {}).get("custo_por_mala_trecho_brl", 0)}/mala/trecho quando a API não informa)<br>
-  Tampa só conta como opção se o voo chegar de manhã e partir à tarde — 1h de estrada até Orlando de cada lado
+  Tampa só conta como opção se o voo chegar de manhã e partir à tarde — 1h de estrada até Orlando de cada lado<br>
+  <b>suposição a confirmar:</b> o valor de bagagem da API é tratado como cobrindo {"cada trecho (ida e volta contam separado)" if cfg.get("bagagem", {}).get("valor_api_cobre") == "trecho" else "a viagem inteira (ida e volta juntas)"} — confira na página de compra; se estiver errado, o custo de bagagem dobra ou cai pela metade e pode inverter qual rota ganha
 </footer>
 </body></html>"""
 
