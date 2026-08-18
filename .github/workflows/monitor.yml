@@ -2,7 +2,7 @@ name: monitor-passagens
 
 on:
   schedule:
-    - cron: "0 * * * *"   # toda hora (UTC). O script decide o que rodar pela hora BRT.
+    - cron: "0 12 * * *"   # 12:00 UTC = 09:00 BRT, 1x por dia (cota SerpApi)
   workflow_dispatch:        # botão "Run workflow" pra rodar manualmente
 
 permissions:
@@ -27,7 +27,7 @@ jobs:
 
       - name: Rodar monitor
         env:
-          TP_TOKEN: ${{ secrets.TP_TOKEN }}
+          SERP_KEY: ${{ secrets.SERP_KEY }}
           MAIL_USER: ${{ secrets.MAIL_USER }}
           MAIL_PASS: ${{ secrets.MAIL_PASS }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
