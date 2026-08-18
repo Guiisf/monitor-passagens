@@ -38,6 +38,11 @@
       "nome": "AA noturno via MIA (chega 8h)",
       "voos": "AA930",
       "limite_brl": 0
+    },
+    {
+      "nome": "Azul direto VCP→MCO (Safira: 2 malas grátis)",
+      "voos": "AD87",
+      "limite_brl": 0
     }
   ]
 }
