@@ -2,7 +2,10 @@ name: monitor-passagens
 
 on:
   schedule:
-    - cron: "0 12 * * *"   # 12:00 UTC = 09:00 BRT, 1x por dia (cota SerpApi)
+    # SPRINT DE IDA ate 21/08/2026 13:34 UTC: de hora em hora, so ida (1 busca
+    # por rota). Depois do prazo o monitor.py desliga o sprint sozinho e volta a
+    # coletar 1x/dia -- e ai vale trocar este cron de volta para "0 12 * * *".
+    - cron: "0 * * * *" (cota SerpApi)
   workflow_dispatch:        # botão "Run workflow" pra rodar manualmente
 
 permissions:
