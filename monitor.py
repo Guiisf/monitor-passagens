@@ -90,8 +90,28 @@ def _serp(params: dict) -> dict:
     return j
 
 
+def _sprint() -> dict:
+    """
+    Config do sprint de ida, ou {} quando o modo está desligado.
+
+    Desliga sozinho depois do prazo da reserva: sem isso o cron de hora em hora
+    continuaria queimando cota buscando uma ida que já foi decidida.
+    """
+    s = CFG.get("sprint") or {}
+    if not s.get("ativo"):
+        return {}
+    prazo = s.get("prazo_utc")
+    if prazo:
+        try:
+            if datetime.now(timezone.utc) > datetime.fromisoformat(prazo.replace("Z", "+00:00")):
+                return {}
+        except ValueError:
+            pass
+    return s
+
+
 def _params_base(origem: str, destino: str) -> dict:
-    return {
+    p = {
         "departure_id": origem,
         "arrival_id": destino,
         "outbound_date": CFG["data_ida"],
@@ -105,6 +125,14 @@ def _params_base(origem: str, destino: str) -> dict:
         "hl": "en",   # textos em inglês: o parser de bagagem casa "checked bag"
         "deep_search": "true",
     }
+    sp = _sprint()
+    if sp:
+        # Só ida: 1 busca por rota em vez de 2, porque não existe a 2ª chamada
+        # com departure_token para fechar a volta. type=2 é one-way na SerpApi.
+        p["type"] = 2
+        p["outbound_date"] = sp["data_ida"]
+        p.pop("return_date", None)
+    return p
 
 
 # ------------------------------------------------------------- parsing ---
@@ -279,12 +307,18 @@ def custo_bagagem(booking_token: str, cias: list[str], origem: str, destino: str
         return 0.0, "isenta"
 
     malas = bag.get("malas_total", 0)
-    # o fallback do config é declaradamente por trecho, então sempre dobra
-    fallback = malas * bag.get("custo_por_mala_trecho_brl", 0) * 2
-    # já o valor da API cobre a viagem toda ou cada trecho — ver 'valor_api_cobre'
-    trechos_api = 2 if bag.get("valor_api_cobre") == "trecho" else 1
+    so_ida = bool(_sprint())
+    trechos = 1 if so_ida else 2
+    # o fallback do config é declaradamente por trecho
+    fallback = malas * bag.get("custo_por_mala_trecho_brl", 0) * trechos
+    # Numa busca só de ida não há ambiguidade: o valor é daquele trecho único.
+    # Na ida-e-volta, depende de 'valor_api_cobre' (suposição ainda em aberto).
+    trechos_api = 1 if so_ida else (2 if bag.get("valor_api_cobre") == "trecho" else 1)
 
-    chave = f"{'-'.join(sorted(cias_set))}|{origem}-{destino}"
+    # Cache separado por tipo de busca: o valor de só-ida não é intercambiável
+    # com o de ida-e-volta. De quebra, comparar os dois resolve a dúvida de
+    # 'valor_api_cobre' — se o só-ida repetir 885, o valor é por trecho.
+    chave = f"{'-'.join(sorted(cias_set))}|{origem}-{destino}{'|IDA' if so_ida else ''}"
     cache = _cache_bagagem()
     reg = cache.get(chave)
     if reg and (datetime.now(timezone.utc) - datetime.fromisoformat(reg["ts"])).days < bag.get("cache_dias", 14):
@@ -351,6 +385,17 @@ def buscar(origem: str, destino: str, n_idas: int = 1) -> list[dict]:
     max_con = CFG["max_conexoes"]
     validos = []
 
+    if _sprint():
+        # Só ida: a 1ª resposta já traz o itinerário completo e o preço final.
+        # Não há 2ª chamada, então a rota inteira custa 1 busca.
+        for o in idas:
+            segs = o.get("flights") or []
+            if not segs or len(segs) - 1 > max_con:
+                continue
+            validos.append((o, segs, []))
+        print(f"[API] {origem}->{destino}: {len(validos)} idas válidas (só ida, 1 busca)")
+        return _montar_opcoes(validos, origem, destino, base)
+
     for i, ida in enumerate(idas[:n_idas], start=1):
         token = ida.get("departure_token")
         if not token:
@@ -368,6 +413,11 @@ def buscar(origem: str, destino: str, n_idas: int = 1) -> list[dict]:
                 continue
             validos.append((p, ida_segs, volta_segs))
 
+    return _montar_opcoes(validos, origem, destino, base)
+
+
+def _montar_opcoes(validos: list, origem: str, destino: str, base: dict) -> list[dict]:
+    """Dedup, filtros de duração e preço, bagagem e ranking — comum a ida e a RT."""
     if not validos:
         return []
 
@@ -391,7 +441,7 @@ def buscar(origem: str, destino: str, n_idas: int = 1) -> list[dict]:
     teto_min = CFG.get("max_duracao_voo_h", 0) * 60
     if teto_min:
         dentro = [t for t in unicos
-                  if _dur_leg(t[1]) <= teto_min and _dur_leg(t[2]) <= teto_min]
+                  if _dur_leg(t[1]) <= teto_min and (_dur_leg(t[2]) or 0) <= teto_min]
         if not dentro:
             # Rota sem nenhuma opção viável no dia: registra assim mesmo, para o
             # histórico não ficar com buraco, mas todas saem marcadas fora do teto
@@ -440,8 +490,10 @@ def buscar(origem: str, destino: str, n_idas: int = 1) -> list[dict]:
             "partida_volta": rv["partida"], "chegada_volta": rv["chegada"],
             "conexoes_ida": ri["conexoes"], "conexoes_volta": rv["conexoes"],
             "duracao_ida": ri["duracao"], "duracao_volta": rv["duracao"],
+            # trecho ausente (só ida) conta como 0, não como string vazia
             "dentro_teto": (not teto_min
-                            or (ri["duracao"] <= teto_min and rv["duracao"] <= teto_min)),
+                            or ((ri["duracao"] or 0) <= teto_min
+                                and (rv["duracao"] or 0) <= teto_min)),
         })
 
     # Ranqueia pelo CUSTO TOTAL, não pela tarifa: é o critério de decisão, e a
@@ -457,6 +509,13 @@ def buscar(origem: str, destino: str, n_idas: int = 1) -> list[dict]:
 # ------------------------------------------------------------------ coleta ---
 def rotas_do_dia(agora_brt: datetime) -> list[dict]:
     """Rotas marcadas para hoje. 'dias' aceita 'todos' ou lista de weekday() (0=seg)."""
+    sp = _sprint()
+    if sp:
+        # No sprint todas as rotas rodam em toda execução: a janela é curta e o
+        # que interessa é cobrir as 4 combinações a cada hora.
+        return [{"origem": o, "destino": d, "idas_exploradas": 1}
+                for o, d in sp["rotas"]]
+
     hoje = agora_brt.weekday()
     ativas = []
     for r in CFG["rotas"]:
@@ -530,6 +589,108 @@ def gravar(linhas: list[dict]) -> None:
 
 
 # ------------------------------------------------------------------ alerta ---
+def solo_ida(origem: str, destino: str) -> tuple[float, list[str]]:
+    """Custo de solo da IDA: Uber até VCP e traslado Tampa->Orlando."""
+    cfg = CFG.get("solo_ida") or {}
+    total, itens = 0.0, []
+    if origem == "VCP":
+        v = cfg.get("VCP_origem_brl", 0)
+        if v:
+            total += v
+            itens.append(f"Uber até VCP {brl(v)}")
+    if destino == "TPA":
+        v = cfg.get("TPA_destino_brl", 0)
+        if v:
+            total += v
+            itens.append(f"traslado Tampa→Orlando {brl(v)}")
+    return total, itens
+
+
+def custo_na_porta(ln: dict) -> float:
+    """Tarifa + bagagem + solo. É a única base honesta para comparar rotas."""
+    return ln["custo_total_brl"] + solo_ida(ln["origem"], ln["destino"])[0]
+
+
+def baseline_na_porta() -> tuple[float, dict]:
+    """
+    Custo na porta da reserva Copa que está travada, para servir de régua.
+
+    A tarifa é conhecida (R$ 3.290,46, 2 passageiros). Bagagem sai do cache real
+    da Copa quando existir; senão, do fallback do config. O traslado de Tampa
+    entra porque a volta já comprada parte de MCO.
+    """
+    sp = _sprint()
+    if not sp:
+        return 0.0, {}
+    b = sp["baseline"]
+    bag_cfg = CFG.get("bagagem") or {}
+    malas = bag_cfg.get("malas_total", 0)
+    reg = _cache_bagagem().get(f"CM|{b['origem']}-{b['destino']}|IDA")
+    if reg and reg.get("mala") is not None:
+        bagagem, fonte_bag = reg["mala"] * malas, "api"
+    else:
+        bagagem = malas * bag_cfg.get("custo_por_mala_trecho_brl", 0)
+        fonte_bag = "estimativa"
+    solo, itens = solo_ida(b["origem"], b["destino"])
+    return b["tarifa_brl"] + bagagem + solo, {
+        "tarifa": b["tarifa_brl"], "bagagem": bagagem, "bagagem_fonte": fonte_bag,
+        "solo": solo, "itens_solo": itens,
+    }
+
+
+def checar_sprint(linhas: list[dict]) -> list[str]:
+    """
+    Compara a coleta contra a reserva da Copa e avisa só quando vale trocar.
+
+    Exige margem mínima: mudar de voo por R$ 50 não paga o trabalho nem o risco
+    de mexer numa reserva que já está de pé.
+    """
+    sp = _sprint()
+    if not sp:
+        return []
+    ref, det = baseline_na_porta()
+    b = sp["baseline"]
+    margem = sp.get("margem_alerta_brl", 0)
+
+    print(f"[SPRINT] régua Copa: tarifa {brl(det['tarifa'])} + bagagem "
+          f"{brl(det['bagagem'])} ({det['bagagem_fonte']}) + solo {brl(det['solo'])} "
+          f"= {brl(ref)} na porta")
+
+    viaveis = [l for l in linhas if l.get("dentro_teto", True)]
+    if not viaveis:
+        print("[SPRINT] nenhuma opção dentro do teto de duração nesta rodada")
+        return []
+
+    melhor = min(viaveis, key=custo_na_porta)
+    porta = custo_na_porta(melhor)
+    ganho = ref - porta
+    solo, itens = solo_ida(melhor["origem"], melhor["destino"])
+    print(f"[SPRINT] melhor da rodada: {melhor['origem']}→{melhor['destino']} "
+          f"{melhor['cia']} {brl(porta)} na porta ({ganho:+,.0f} vs Copa)")
+
+    if ganho < margem:
+        return []
+
+    extra = f" (inclui {', '.join(itens)})" if itens else ""
+    return [
+        f"💰 ACHOU ALGO MELHOR QUE A COPA — economia de {brl(ganho)}",
+        "",
+        f"Alternativa: {melhor['origem']}→{melhor['destino']} · {melhor['cia']} · "
+        f"{melhor['voos_ida']}",
+        f"  parte {melhor['partida_ida']}, chega {melhor['chegada_ida']} · "
+        f"{melhor['duracao_ida'] // 60}h{melhor['duracao_ida'] % 60:02d} · "
+        f"{melhor['conexoes_ida']} conexão(ões) via {melhor['via_ida'] or '—'}",
+        f"  tarifa {brl(melhor['preco_total_brl'])} + bagagem "
+        f"{brl(melhor['bagagem_brl'])} ({melhor['bagagem_fonte']}) + solo {brl(solo)}"
+        f" = {brl(porta)} na porta{extra}",
+        "",
+        f"Reserva atual: Copa {b['voos']} · parte {b['partida']}, chega {b['chegada']}"
+        f" · {brl(ref)} na porta",
+        "",
+        f"⏰ A Copa vence em {sp['prazo_utc']} — se for trocar, decida antes disso.",
+    ]
+
+
 def _queda_relevante(minimo: float, preco: float) -> bool:
     """
     Se a queda abaixo do mínimo histórico merece e-mail.
@@ -638,7 +799,9 @@ def main() -> None:
     orcamento = CFG.get("orcamento_buscas_mes", 250)
 
     rotas = rotas_do_dia(agora_brt)
-    estimativa = sum(1 + r.get("idas_exploradas", 1) for r in rotas)
+    # só ida gasta 1 busca por rota; ida-e-volta gasta 1 + as idas exploradas
+    estimativa = (len(rotas) if _sprint()
+                  else sum(1 + r.get("idas_exploradas", 1) for r in rotas))
     if usado + estimativa > orcamento:
         aviso = (f"⚠️ Coleta pulada: cota SerpApi de {orcamento} buscas/mês quase no fim "
                  f"({usado} usadas, mais {estimativa} nesta rodada). Volta no dia 1º.")
@@ -669,7 +832,9 @@ def main() -> None:
             "A partir de agora o robô acumula histórico 1x por dia.",
         ])
 
-    msgs = checar_alertas(linhas)
+    # No sprint o alerta é outro: não interessa "caiu 8%", e sim "existe algo
+    # melhor que a reserva que vence amanhã".
+    msgs = checar_sprint(linhas) if _sprint() else checar_alertas(linhas)
     if msgs:
         for m in msgs:
             print(m)
