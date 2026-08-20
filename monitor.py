@@ -688,18 +688,46 @@ def checar_sprint(linhas: list[dict]) -> list[str]:
         print("[SPRINT] nenhuma opção dentro do teto de duração nesta rodada")
         return []
 
-    melhor = min(viaveis, key=custo_na_porta)
+    # O voo da própria reserva aparece nos resultados. Tratá-lo como
+    # "alternativa" é enganoso: não é troca, é a mesma passagem com outro preço
+    # — quase sempre outra família tarifária, não uma oferta melhor.
+    alvo = str(sp["baseline"].get("voos", ""))
+    eh_baseline = [l for l in viaveis if str(l.get("voos_ida", "")) == alvo]
+    outros = [l for l in viaveis if str(l.get("voos_ida", "")) != alvo]
+
+    msgs = []
+    if eh_baseline:
+        mesmo = min(eh_baseline, key=custo_na_porta)
+        dif = sp["baseline"]["tarifa_brl"] - mesmo["preco_total_brl"]
+        print(f"[SPRINT] a própria reserva aparece a {brl(mesmo['preco_total_brl'])} "
+              f"de tarifa ({dif:+,.0f} vs os {brl(sp['baseline']['tarifa_brl'])} travados)")
+        if dif >= margem:
+            msgs += [
+                f"🔁 SEU PRÓPRIO VOO ESTÁ {brl(dif)} MAIS BARATO AGORA",
+                f"{alvo} — mesma partida {sp['baseline']['partida']}, mesma chegada "
+                f"{sp['baseline']['chegada']} — aparece por {brl(mesmo['preco_total_brl'])} "
+                f"de tarifa, contra {brl(sp['baseline']['tarifa_brl'])} da sua reserva.",
+                "⚠️ Confira a FAMÍLIA TARIFÁRIA antes de refazer: a sua é Economy "
+                "Classic (L). Tarifa mais barata no mesmo voo costuma ser Basic, "
+                "com menos bagagem, sem escolha de assento e sem alteração.",
+                "",
+            ]
+
+    if not outros:
+        return msgs
+
+    melhor = min(outros, key=custo_na_porta)
     porta = custo_na_porta(melhor)
     ganho = ref - porta
     solo, itens = solo_ida(melhor["origem"], melhor["destino"])
-    print(f"[SPRINT] melhor da rodada: {melhor['origem']}→{melhor['destino']} "
+    print(f"[SPRINT] melhor alternativa: {melhor['origem']}→{melhor['destino']} "
           f"{melhor['cia']} {brl(porta)} na porta ({ganho:+,.0f} vs Copa)")
 
     if ganho < margem:
-        return []
+        return msgs
 
     extra = f" (inclui {', '.join(itens)})" if itens else ""
-    return [
+    return msgs + [
         f"💰 ACHOU ALGO MELHOR QUE A COPA — economia de {brl(ganho)}",
         "",
         f"Alternativa: {melhor['origem']}→{melhor['destino']} · {melhor['cia']} · "
