@@ -41,7 +41,8 @@
   "opcoes_por_consulta": 5,
   "max_fator_preco": 2.5,
   "_nota_fator": "Descarta opcoes acima de 2.5x a mais barata da rota: sao tarifas premium que vazam da busca por economica e nunca serao a resposta.",
-  "max_duracao_voo_h": 11,
+  "max_duracao_voo_h": 13,
+  "_nota_duracao": "Teto por trecho, em horas. Passou a FILTRAR de verdade (antes era so um selo no painel): opcao acima disso sai do ranking, do CSV e dos alertas. Motivo: um itinerario de 13h22 via ORD virou rank 1 e disparou e-mail em 20/08, sendo um desvio ao norte de Orlando que nunca seria comprado. Se sobrar nenhuma opcao na rota, o filtro e ignorado e a coleta avisa no log.",
   "vcp_custo_extra_brl": 200,
   "tampa_custo_extra_brl": 1800,
   "tampa_janela": {
@@ -50,6 +51,9 @@
     "partida_volta_h": [12, 19]
   },
   "alerta_queda_pct": 8,
+  "alerta_min_queda_brl": 150,
+  "alerta_min_queda_pct": 2,
+  "_nota_min_queda": "Piso para o alerta de NOVO MINIMO: exige queda de pelo menos 'brl' OU 'pct' do minimo anterior, o que for maior. Sem isso, R$ 80 numa rota de R$ 13.891 (0,6%) disparava e-mail -- ruido que faz ignorar a caixa de entrada justamente quando vier o alerta bom.",
   "alerta_limite_brl": {
     "MCO": 0,
     "TPA": 0
