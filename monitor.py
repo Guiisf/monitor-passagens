@@ -578,11 +578,38 @@ def coletar(rotas: list[dict]) -> list[dict]:
     return linhas
 
 
+def _migrar_csv(header_atual: list[str]) -> None:
+    """
+    Reescreve o CSV quando CSV_COLS muda, preservando o histórico.
+
+    Sem isso, acrescentar uma coluna quebra o arquivo em silêncio: o cabeçalho
+    velho continua com N campos e as linhas novas passam a ter N+1, e a leitura
+    morre com "Expected N fields, saw N+1". Foi o que derrubou a coleta quando
+    'dentro_teto' entrou.
+    """
+    with CSV_PATH.open(newline="", encoding="utf-8") as f:
+        antigas = list(csv.DictReader(f))
+    tmp = CSV_PATH.with_suffix(".csv.tmp")
+    with tmp.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_COLS, extrasaction="ignore")
+        w.writeheader()
+        for r in antigas:
+            w.writerow({c: r.get(c, "") for c in CSV_COLS})
+    tmp.replace(CSV_PATH)
+    novas = [c for c in CSV_COLS if c not in header_atual]
+    print(f"[CSV] esquema migrado: {len(antigas)} linhas, colunas novas {novas}")
+
+
 def gravar(linhas: list[dict]) -> None:
     DATA_DIR.mkdir(exist_ok=True)
     novo = not CSV_PATH.exists()
+    if not novo:
+        with CSV_PATH.open(newline="", encoding="utf-8") as f:
+            header_atual = next(csv.reader(f), [])
+        if header_atual and header_atual != CSV_COLS:
+            _migrar_csv(header_atual)
     with CSV_PATH.open("a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=CSV_COLS)
+        w = csv.DictWriter(f, fieldnames=CSV_COLS, extrasaction="ignore")
         if novo:
             w.writeheader()
         w.writerows(linhas)
