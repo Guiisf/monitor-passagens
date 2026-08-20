@@ -48,6 +48,7 @@ CSV_COLS = [
     "cia", "voos_ida", "voos_volta", "via_ida", "via_volta",
     "partida_ida", "chegada_ida", "partida_volta", "chegada_volta",
     "conexoes_ida", "conexoes_volta", "duracao_ida", "duracao_volta",
+    "dentro_teto",
 ]
 
 _creditos = 0
@@ -151,6 +152,38 @@ def _separar_legs(segs: list[dict], origem: str, destino: str) -> tuple[list, li
     return segs[:corte], segs[corte:]
 
 
+# Fuso local em setembro/2026: Brasil não tem mais horário de verão (UTC-3);
+# Flórida está em EDT (UTC-4). Só os extremos do trecho importam para o tempo
+# decorrido — o aeroporto de conexão se cancela na conta.
+TZ_AEROPORTO = {"GRU": -3, "VCP": -3, "CGH": -3, "MCO": -4, "TPA": -4}
+
+
+def _dur_leg(segs: list[dict]) -> int:
+    """
+    Tempo REAL de porta a porta do trecho, em minutos — conexão inclusa.
+
+    Somar a duração dos voos ignora a espera e engana feio: um GRU->ORD->MCO
+    aparecia como 13h22 de voo quando na verdade leva 26h34, com 13h12 parado
+    em Chicago. Cai na soma dos voos se os horários não vierem utilizáveis.
+    """
+    if not segs:
+        return 0
+    voos = sum(int(s.get("duration") or 0) for s in segs)
+    ts_dep = segs[0].get("departure_airport", {}).get("time", "")
+    ts_arr = segs[-1].get("arrival_airport", {}).get("time", "")
+    id_dep = segs[0].get("departure_airport", {}).get("id", "")
+    id_arr = segs[-1].get("arrival_airport", {}).get("id", "")
+    try:
+        dep = datetime.strptime(ts_dep, "%Y-%m-%d %H:%M")
+        arr = datetime.strptime(ts_arr, "%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return voos
+    # local -> UTC: utc = local - offset
+    delta = (arr - dep).total_seconds() / 60
+    delta += (TZ_AEROPORTO.get(id_dep, -3) - TZ_AEROPORTO.get(id_arr, -3)) * 60
+    return int(delta) if delta > 0 else voos
+
+
 def _resumo_leg(segs: list[dict]) -> dict:
     if not segs:
         return {"voos": "", "via": "", "conexoes": "", "partida": "", "chegada": "",
@@ -161,7 +194,8 @@ def _resumo_leg(segs: list[dict]) -> dict:
     if _dia(chegada_ts) > _dia(partida):
         chegada += "+1"
     vias = [s.get("arrival_airport", {}).get("id", "") for s in segs[:-1]]
-    duracao = sum(int(s.get("duration") or 0) for s in segs)
+    # porta a porta, conexão inclusa — é o que o passageiro sente
+    duracao = _dur_leg(segs)
     return {
         "voos": ",".join(_cod_voo(s) for s in segs),
         "via": ",".join(v for v in vias if v),
@@ -349,6 +383,27 @@ def buscar(origem: str, destino: str, n_idas: int = 1) -> list[dict]:
         vistos.add(chave)
         unicos.append((p, ida_segs, volta_segs))
 
+    # Corta itinerários longos demais. O teto já existia no config, mas só pintava
+    # um selo no painel — em 20/08 uma ida de 13h22 via ORD (desvio ao norte de
+    # Orlando) virou rank 1 e disparou e-mail. Agora sai do ranking, do CSV e dos
+    # alertas. Se não sobrar nada, o filtro é ignorado: melhor dado ruim que rota
+    # sem leitura nenhuma.
+    teto_min = CFG.get("max_duracao_voo_h", 0) * 60
+    if teto_min:
+        dentro = [t for t in unicos
+                  if _dur_leg(t[1]) <= teto_min and _dur_leg(t[2]) <= teto_min]
+        if not dentro:
+            # Rota sem nenhuma opção viável no dia: registra assim mesmo, para o
+            # histórico não ficar com buraco, mas todas saem marcadas fora do teto
+            # e os alertas as ignoram — o painel mostra, o e-mail não incomoda.
+            print(f"[DURACAO] {origem}->{destino}: nenhuma opção dentro de "
+                  f"{teto_min // 60}h; registrando fora do teto", file=sys.stderr)
+        else:
+            if len(dentro) < len(unicos):
+                print(f"[DURACAO] {origem}->{destino}: {len(unicos) - len(dentro)} "
+                      f"opções acima de {teto_min // 60}h descartadas")
+            unicos = dentro
+
     # corta tarifas premium que vazam da busca por econômica e nunca serão a resposta
     fator = CFG.get("max_fator_preco", 0)
     if fator:
@@ -385,6 +440,8 @@ def buscar(origem: str, destino: str, n_idas: int = 1) -> list[dict]:
             "partida_volta": rv["partida"], "chegada_volta": rv["chegada"],
             "conexoes_ida": ri["conexoes"], "conexoes_volta": rv["conexoes"],
             "duracao_ida": ri["duracao"], "duracao_volta": rv["duracao"],
+            "dentro_teto": (not teto_min
+                            or (ri["duracao"] <= teto_min and rv["duracao"] <= teto_min)),
         })
 
     # Ranqueia pelo CUSTO TOTAL, não pela tarifa: é o critério de decisão, e a
@@ -455,6 +512,7 @@ def coletar(rotas: list[dict]) -> list[dict]:
                     "rank", "cia", "voos_ida", "voos_volta", "via_ida", "via_volta",
                     "partida_ida", "chegada_ida", "partida_volta", "chegada_volta",
                     "conexoes_ida", "conexoes_volta", "duracao_ida", "duracao_volta",
+                    "dentro_teto",
                 )},
             })
         time.sleep(1)
@@ -472,6 +530,21 @@ def gravar(linhas: list[dict]) -> None:
 
 
 # ------------------------------------------------------------------ alerta ---
+def _queda_relevante(minimo: float, preco: float) -> bool:
+    """
+    Se a queda abaixo do mínimo histórico merece e-mail.
+
+    Sem piso, qualquer centavo virava "NOVO MÍNIMO": R$ 80 numa rota de
+    R$ 13.891 (0,6%) disparou alerta em 20/08. Ruído assim ensina a ignorar a
+    caixa de entrada justamente quando vier o alerta que importa.
+    """
+    if minimo <= 0:
+        return True
+    piso = max(CFG.get("alerta_min_queda_brl", 0),
+               minimo * CFG.get("alerta_min_queda_pct", 0) / 100)
+    return (minimo - preco) >= piso
+
+
 def checar_alertas(linhas: list[dict]) -> list[str]:
     """Compara a coleta atual com o histórico e devolve mensagens de alerta."""
     import pandas as pd
@@ -483,6 +556,10 @@ def checar_alertas(linhas: list[dict]) -> list[str]:
     msgs = []
     for ln in linhas:
         if ln["rank"] != 1:
+            continue
+        if not ln.get("dentro_teto", True):
+            print(f"[ALERTA] {ln['origem']}→{ln['destino']}: melhor opção está fora do "
+                  f"teto de duração; sem e-mail nesta rodada")
             continue
         chave = (df["origem"] == ln["origem"]) & (df["destino"] == ln["destino"])
         hist = df[chave]["custo_total_brl"]
@@ -496,7 +573,7 @@ def checar_alertas(linhas: list[dict]) -> list[str]:
         queda = (anterior - preco) / anterior * 100 if anterior else 0
         limite = CFG["alerta_limite_brl"].get(ln["destino"], 0)
 
-        if preco < minimo:
+        if preco < minimo and _queda_relevante(minimo, preco):
             msgs.append(f"🔥 NOVO MÍNIMO: {rota} — {brl(preco)} (mínimo anterior {brl(minimo)})")
         elif queda >= CFG["alerta_queda_pct"]:
             msgs.append(f"📉 Queda de {queda:.0f}%: {rota} — {brl(preco)} (antes {brl(anterior)})")
@@ -510,8 +587,9 @@ def checar_alertas(linhas: list[dict]) -> list[str]:
         nome = fav.get("nome", alvo)
         limite = fav.get("limite_brl", 0)
         atuais = [l for l in linhas
-                  if casa_favorito(l.get("voos_ida"), alvo)
-                  or casa_favorito(l.get("voos_volta"), alvo)]
+                  if l.get("dentro_teto", True)
+                  and (casa_favorito(l.get("voos_ida"), alvo)
+                       or casa_favorito(l.get("voos_volta"), alvo))]
         grupos = {}
         for l in atuais:
             grupos.setdefault(tuple(str(l.get(k, "")) for k in chaves), []).append(l)
@@ -528,7 +606,7 @@ def checar_alertas(linhas: list[dict]) -> list[str]:
             if len(hist):
                 minimo, anterior = hist.min(), hist.iloc[-1]
                 queda = (anterior - preco) / anterior * 100 if anterior else 0
-                if preco < minimo:
+                if preco < minimo and _queda_relevante(minimo, preco):
                     msgs.append(f"⭐ FAVORITO em novo mínimo: {desc} — {brl(preco)} (antes {brl(minimo)})")
                 elif queda >= CFG["alerta_queda_pct"]:
                     msgs.append(f"⭐ FAVORITO caiu {queda:.0f}%: {desc} — {brl(preco)}")
