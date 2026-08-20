@@ -173,7 +173,9 @@ def _tabela_opcoes(df: pd.DataFrame, cfg: dict) -> str:
         horario = f"{r.partida_ida}→{r.chegada_ida} / {r.partida_volta}→{r.chegada_volta}"
         voos = f"{r.voos_ida} / {r.voos_volta}"
 
-        badge = '<span class="ok11">≤11h</span>' if ok11 else '<span class="no11">+11h</span>'
+        teto_h = cfg.get("max_duracao_voo_h", 11)
+        badge = (f'<span class="ok11">≤{teto_h}h</span>' if ok11
+                 else f'<span class="no11">+{teto_h}h · não alerta</span>')
         if r.destino == "TPA":
             viavel = tampa_ok(r.chegada_ida, r.partida_volta, cfg)
             sel_tpa = (' <span class="ok11">✓ estrada ok</span>' if viavel
@@ -336,6 +338,7 @@ def gerar_dashboard(csv_path: Path, saida: Path, cfg: dict) -> None:
 <footer>
   gerado automaticamente pelo monitor · preços do Google Flights via SerpApi · bagagem real do campo baggage_prices (fallback R$ {cfg.get("bagagem", {}).get("custo_por_mala_trecho_brl", 0)}/mala/trecho quando a API não informa)<br>
   Tampa só conta como opção se o voo chegar de manhã e partir à tarde — 1h de estrada até Orlando de cada lado<br>
+  duração é <b>porta a porta, com a conexão inclusa</b> — opções acima de {cfg.get("max_duracao_voo_h", 11)}h aparecem aqui mas não disparam e-mail<br>
   <b>suposição a confirmar:</b> o valor de bagagem da API é tratado como cobrindo {"cada trecho (ida e volta contam separado)" if cfg.get("bagagem", {}).get("valor_api_cobre") == "trecho" else "a viagem inteira (ida e volta juntas)"} — confira na página de compra; se estiver errado, o custo de bagagem dobra ou cai pela metade e pode inverter qual rota ganha
 </footer>
 </body></html>"""
