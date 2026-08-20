@@ -1,5 +1,35 @@
 {
-  "_nota": "Datas fixas, ida e volta fechado. Prioridade: chegar em MCO saindo de GRU. VCP e TPA sao comparativos. 'idas_exploradas' = quantas opcoes de ida ganham uma 2a chamada para fechar a volta; cada ida extra custa 1 busca, mas so olhar a ida mais barata escondia combinacoes melhores.",
+  "_nota": "MODO SPRINT DE IDA ativo desde 20/08/2026. A volta ja foi comprada (MCO->CGH, R$ 3.944,20, bagagem inclusa pelo Safira), entao so a IDA importa agora. Enquanto sprint.ativo for true, o robo ignora 'rotas' e usa 'sprint.rotas', busca so ida (1 busca por rota em vez de 2) e compara tudo contra a reserva da Copa que vence em 21/08. Para voltar ao monitoramento normal de ida e volta: sprint.ativo = false.",
+  "sprint": {
+    "ativo": true,
+    "_nota": "Sprint de 23h ate o prazo de pagamento da reserva Copa AYYIQP. De hora em hora, 4 rotas, so ida.",
+    "prazo_utc": "2026-08-21T13:34:00Z",
+    "data_ida": "2026-09-23",
+    "rotas": [
+      ["GRU", "MCO"],
+      ["GRU", "TPA"],
+      ["VCP", "MCO"],
+      ["VCP", "TPA"]
+    ],
+    "baseline": {
+      "nome": "Copa CM702+CM393 (reserva AYYIQP, a pagar)",
+      "origem": "GRU",
+      "destino": "TPA",
+      "voos": "CM702,CM393",
+      "tarifa_brl": 3290.46,
+      "partida": "03:15",
+      "chegada": "13:35",
+      "duracao_min": 680,
+      "_nota": "Tarifa dos 2 passageiros, sem bagagem. GRU 03:15 -> PTY 08:11 -> TPA 13:35. O robo soma bagagem e traslado por cima para comparar na mesma base."
+    },
+    "margem_alerta_brl": 200,
+    "_nota_margem": "So avisa se a alternativa ganhar da Copa por pelo menos isso no custo na porta. Trocar de voo por R$ 50 nao compensa o trabalho nem o risco."
+  },
+  "solo_ida": {
+    "_nota": "Custos de solo da IDA apenas. TPA caiu de 1800 para 900 porque a volta sai de MCO: o traslado Tampa->Orlando e um trajeto so, nao ida e volta.",
+    "VCP_origem_brl": 200,
+    "TPA_destino_brl": 900
+  },
   "rotas": [
     {
       "origem": "GRU",
