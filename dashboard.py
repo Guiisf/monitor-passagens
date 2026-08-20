@@ -85,9 +85,28 @@ def tampa_ok(chegada_ida, partida_volta, cfg: dict) -> bool:
     return ch_min <= ch < ch_max and pt_min <= pt < pt_max
 
 
+def em_sprint(cfg: dict) -> bool:
+    return bool((cfg.get("sprint") or {}).get("ativo"))
+
+
 def custo_extra(origem: str, destino: str, cfg: dict) -> tuple[float, list[str]]:
     """Custos de solo que não estão na tarifa: Uber até VCP e carro/estrada de TPA."""
     total, itens = 0.0, []
+    if em_sprint(cfg):
+        # No sprint só a IDA está em jogo: a volta já foi comprada saindo de MCO,
+        # então o traslado de Tampa é um trajeto só, não ida e volta.
+        s = cfg.get("solo_ida") or {}
+        if origem == "VCP":
+            v = s.get("VCP_origem_brl", 0)
+            if v:
+                total += v
+                itens.append(("Uber até VCP (+1h30)", v))
+        if destino == "TPA":
+            v = s.get("TPA_destino_brl", 0)
+            if v:
+                total += v
+                itens.append(("traslado Tampa→Orlando (1h)", v))
+        return total, itens
     if origem == "VCP":
         v = cfg.get("vcp_custo_extra_brl", 0)
         if v:
@@ -278,6 +297,52 @@ def gerar_dashboard(csv_path: Path, saida: Path, cfg: dict) -> None:
         else:
             fig_fav = None
 
+    # ---- placar do sprint: a régua é a reserva da Copa que vence ----
+    painel_sprint = ""
+    if em_sprint(cfg):
+        sp = cfg["sprint"]
+        b = sp["baseline"]
+        bag_cfg = cfg.get("bagagem") or {}
+        bag_base = bag_cfg.get("malas_total", 0) * bag_cfg.get("custo_por_mala_trecho_brl", 0)
+        solo_base = custo_extra(b["origem"], b["destino"], cfg)[0]
+        ref = b["tarifa_brl"] + bag_base + solo_base
+
+        viav = df[(df.ts_utc == df.ts_utc.max()) & (df.get("dentro_teto", True) != False)].copy()
+        linhas_cmp = ""
+        if len(viav):
+            viav = viav.assign(_solo=[custo_extra(o, d, cfg)[0]
+                                      for o, d in zip(viav.origem, viav.destino)])
+            viav = viav.assign(_porta=viav.custo_total_brl + viav._solo).sort_values("_porta")
+            for _, r in viav.head(5).iterrows():
+                dif = ref - r._porta
+                cls = "ganha" if dif >= sp.get("margem_alerta_brl", 0) else "perde"
+                sinal = f"−{brl(abs(dif))}" if dif > 0 else f"+{brl(abs(dif))}"
+                linhas_cmp += (
+                    f'<tr><td>{r.origem}→{r.destino}<div class="sub">{nome_cia(r.cia)} · '
+                    f'{r.voos_ida}</div></td>'
+                    f'<td>{r.partida_ida}→{r.chegada_ida}<div class="sub">'
+                    f'{fmt_dur(r.duracao_ida)} · {_con_txt(r.via_ida, r.conexoes_ida)}</div></td>'
+                    f'<td class="preco-td">{brl(r.custo_total_brl)}<div class="sub">'
+                    f'+ {brl(r._solo)} solo</div></td>'
+                    f'<td class="preco-td"><b>{brl(r._porta)}</b></td>'
+                    f'<td class="{cls}">{sinal}</td></tr>')
+
+        painel_sprint = f"""
+  <div class="sprint">
+    <div class="eyebrow">⏰ decisão até {sp['prazo_utc'][:16].replace('T', ' ')} UTC</div>
+    <h2 style="margin:6px 0 2px">Bater a reserva da Copa</h2>
+    <div class="meta">{b['nome']} · {b['voos']} · parte {b['partida']}, chega {b['chegada']} em {b['destino']}</div>
+    <div class="regua">
+      <span>tarifa {brl(b['tarifa_brl'])}</span> + <span>bagagem {brl(bag_base)} (estimada)</span>
+      + <span>solo {brl(solo_base)}</span> = <b>{brl(ref)} na porta</b>
+    </div>
+    <table class="opcoes"><thead><tr><th>alternativa</th><th>horário</th>
+    <th>tarifa + bagagem</th><th>na porta</th><th>vs Copa</th></tr></thead>
+    <tbody>{linhas_cmp or '<tr><td colspan="5">sem opção viável nesta rodada</td></tr>'}</tbody></table>
+    <div class="meta" style="margin-top:8px">só avisa por e-mail quem ganhar por
+    {brl(sp.get('margem_alerta_brl', 0))} ou mais · volta já comprada: MCO→CGH, bagagem inclusa pelo Safira</div>
+  </div>"""
+
     ultima = df.ts_brt.max().strftime("%d/%m/%Y %H:%M")
     n = len(df)
     ida_fmt = f"{cfg['data_ida'][8:]}/{cfg['data_ida'][5:7]}"
@@ -318,6 +383,11 @@ def gerar_dashboard(csv_path: Path, saida: Path, cfg: dict) -> None:
   .sem-bag{{color:{TEAL};font-weight:600}}
   .bag-free{{color:{TEAL}}}
   table.opcoes a{{color:{TEAL};text-decoration:none}}
+  .sprint{{background:{PANEL};border-radius:10px;padding:16px 18px;margin:18px 0 26px;border-top:3px solid {AMBER}}}
+  .sprint .regua{{font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:{MUT};margin:10px 0 14px;padding:9px 12px;background:{BG};border-radius:6px}}
+  .sprint .regua b{{color:{AMBER}}}
+  .ganha{{color:{TEAL};font-family:'IBM Plex Mono',monospace;font-weight:600;white-space:nowrap}}
+  .perde{{color:{MUT};font-family:'IBM Plex Mono',monospace;white-space:nowrap}}
   .ok11{{color:{TEAL};font-size:10px;font-family:'IBM Plex Mono',monospace}}
   .no11{{color:{ROSE};font-size:10px;font-family:'IBM Plex Mono',monospace}}
   footer{{color:{MUT};font-size:11px;text-align:center;padding:14px;font-family:'IBM Plex Mono',monospace;line-height:1.7}}
@@ -328,6 +398,7 @@ def gerar_dashboard(csv_path: Path, saida: Path, cfg: dict) -> None:
   <div class="meta">última coleta {ultima} BRT · {n} leituras acumuladas · ida {ida_fmt} · volta {volta_fmt} · 2 adultos · até 1 conexão</div>
 </header>
 <main>
+  {painel_sprint}
   <h2>Custo total na porta <span class="h2sub">tarifa + bagagem despachada + custo de solo (Uber até VCP, carro de Tampa) — comparação justa entre as rotas</span></h2>
   <div class="cards">{cards}</div>
   <h2>Melhores opções agora <span class="h2sub">top 3 de cada rota · Azul sai com bagagem inclusa pelo seu Safira</span></h2>
