@@ -37,6 +37,11 @@ jobs:
         run: python monitor.py
 
       - name: Commit dos dados e dashboard
+        # always(): mesmo se o monitor quebrar, as buscas ja foram cobradas pela
+        # SerpApi. Pular o commit perde o contador de cota e os precos coletados,
+        # e o robo volta a achar que tem mais saldo do que tem. O job segue
+        # marcado como falho pelo passo anterior.
+        if: always()
         run: |
           git config user.name "monitor-bot"
           git config user.email "bot@users.noreply.github.com"
