@@ -1,7 +1,8 @@
 {
   "_nota": "MODO SPRINT DE IDA ativo desde 20/08/2026. A volta ja foi comprada (MCO->CGH, R$ 3.944,20, bagagem inclusa pelo Safira), entao so a IDA importa agora. Enquanto sprint.ativo for true, o robo ignora 'rotas' e usa 'sprint.rotas', busca so ida (1 busca por rota em vez de 2) e compara tudo contra a reserva da Copa que vence em 21/08. Para voltar ao monitoramento normal de ida e volta: sprint.ativo = false.",
   "sprint": {
-    "ativo": true,
+    "ativo": false,
+    "_encerrado": "Sprint rodou 21 rodadas entre 20/08 15:08 e 21/08 13:34 UTC e cumpriu o objetivo. Mantido aqui como modelo: para uma nova decisao com prazo, basta atualizar baseline/prazo_utc/data_ida e ligar de novo.",
     "_nota": "Sprint de 23h ate o prazo de pagamento da reserva Copa AYYIQP. De hora em hora, 4 rotas, so ida.",
     "prazo_utc": "2026-08-21T13:34:00Z",
     "data_ida": "2026-09-23",
