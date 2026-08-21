@@ -1,11 +1,19 @@
 name: monitor-passagens
 
 on:
-  schedule:
-    # SPRINT DE IDA ate 21/08/2026 13:34 UTC: de hora em hora, so ida (1 busca
-    # por rota). Depois do prazo o monitor.py desliga o sprint sozinho e volta a
-    # coletar 1x/dia -- e ai vale trocar este cron de volta para "0 12 * * *".
-    - cron: "0 * * * *"
+  # DESLIGADO em 21/08/2026: a viagem foi fechada (volta MCO->CGH comprada,
+  # ida Copa AYYIQP decidida), entao nao ha mais o que monitorar.
+  #
+  # O gatilho automatico esta comentado de proposito. Sem ele o robo so roda
+  # quando voce clicar em "Run workflow", e nao consome cota sozinho.
+  #
+  # Para religar depois: descomente o bloco schedule abaixo. Use "0 12 * * *"
+  # (1x por dia, 09:00 BRT) -- NAO deixe "0 * * * *" ligado fora de um sprint,
+  # porque de hora em hora a grade de ida e volta gasta ~7 buscas por rodada,
+  # ~170 por dia, e a cota de 250/mes evapora em menos de dois dias.
+  #
+  # schedule:
+  #   - cron: "0 12 * * *"
   workflow_dispatch:        # botão "Run workflow" pra rodar manualmente
 
 permissions:
